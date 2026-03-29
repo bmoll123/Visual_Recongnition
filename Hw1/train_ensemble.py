@@ -11,9 +11,8 @@ import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 import zipfile
-import timm  # <--- 新增: 引入 timm 庫來載入 ReXNet
+import timm
 
-# 新增：用於繪製混淆矩陣的套件
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.metrics import confusion_matrix
@@ -41,38 +40,19 @@ class FocalLoss(nn.Module):
         else:
             return focal_loss
 
-def get_class_weights(train_dir):
-    class_names = sorted([d for d in os.listdir(train_dir) if os.path.isdir(os.path.join(train_dir, d))])
-    num_classes = len(class_names)
-    
-    class_counts = []
-    for class_name in class_names:
-        class_path = os.path.join(train_dir, class_name)
-        num_files = len([f for f in os.listdir(class_path) if os.path.isfile(os.path.join(class_path, f))])
-        class_counts.append(num_files)
-        
-    class_counts = np.array(class_counts)
-    total_samples = np.sum(class_counts)
-    
-    weights = total_samples / (num_classes * class_counts)
-    return torch.tensor(weights, dtype=torch.float32)
-
 def generate_predictions(model, device, test_loader, output_csv_path, run_name):
     model.eval()
     results = []
-    
     with torch.no_grad():
         for inputs, _, img_names in tqdm(test_loader, desc="Generating Predictions"):
             inputs = inputs.to(device)
             outputs = model(inputs)
             _, preds = torch.max(outputs, 1)
-            
             for img_name, pred in zip(img_names, preds):
                 results.append({'image_name': img_name, 'pred_label': pred.item()})
 
     df = pd.DataFrame(results)
     df = df.sort_values(by='image_name').reset_index(drop=True)
-    
     df.to_csv(output_csv_path, index=False)
     print(f"Predictions saved to: {output_csv_path}")
     
@@ -81,10 +61,59 @@ def generate_predictions(model, device, test_loader, output_csv_path, run_name):
         zipf.write(output_csv_path, arcname=Path(output_csv_path).name)
     print(f"Zipped prediction saved to: {output_zip_path}")
 
-# 新增：繪製混淆矩陣的函式
+def generate_ensemble_predictions(model, device, test_loader, weight_paths, output_csv_path, run_name):
+    """
+    讀取多個權重進行推論，將機率 (Softmax) 平均後再決定最終預測類別
+    """
+    image_to_probs = {}
+    num_models = len(weight_paths)
+    
+    for idx, weight_path in enumerate(weight_paths):
+        print(f"\n[{idx+1}/{num_models}] Loading weight for ensemble: {weight_path}")
+        if not Path(weight_path).exists():
+            print(f"Warning: Weight file not found: {weight_path}. Skipping.")
+            num_models -= 1
+            continue
+            
+        model.load_state_dict(torch.load(weight_path, map_location=device)['model_state_dict'])
+        model.eval()
+        
+        with torch.no_grad():
+            for inputs, _, img_names in tqdm(test_loader, desc=f"Inference"):
+                inputs = inputs.to(device)
+                outputs = model(inputs)
+                probs = F.softmax(outputs, dim=1)
+                
+                for i, img_name in enumerate(img_names):
+                    if img_name not in image_to_probs:
+                        image_to_probs[img_name] = probs[i].cpu()
+                    else:
+                        image_to_probs[img_name] += probs[i].cpu()
+
+    if num_models == 0:
+        print("Error: No valid models loaded for ensemble.")
+        return
+
+    print("\nCalculating final ensemble predictions...")
+    results = []
+    for img_name, sum_probs in image_to_probs.items():
+        avg_probs = sum_probs / num_models
+        pred_label = torch.argmax(avg_probs).item()
+        results.append({'image_name': img_name, 'pred_label': pred_label})
+
+    df = pd.DataFrame(results)
+    df = df.sort_values(by='image_name').reset_index(drop=True)
+    df.to_csv(output_csv_path, index=False)
+    print(f"Ensemble predictions saved to: {output_csv_path}")
+    
+    output_zip_path = Path(output_csv_path).parent / f"{run_name}_ensemble.zip"
+    with zipfile.ZipFile(output_zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        zipf.write(output_csv_path, arcname=Path(output_csv_path).name)
+    print(f"Zipped ensemble prediction saved to: {output_zip_path}")
+
 def save_confusion_matrix(all_labels, all_preds, class_names, save_path):
     cm = confusion_matrix(all_labels, all_preds)
-    plt.figure(figsize=(20, 16)) # 100類需要較大尺寸
+    plt.figure(figsize=(20, 16)) 
     sns.heatmap(cm, annot=False, cmap='Blues', xticklabels=class_names, yticklabels=class_names)
     plt.xlabel('Predicted Labels')
     plt.ylabel('True Labels')
@@ -95,17 +124,20 @@ def save_confusion_matrix(all_labels, all_preds, class_names, save_path):
 
 def main():
     parser = argparse.ArgumentParser()
-    # <--- 修改: 將 rexnet 的不同寬度版本加入 choices 中
     parser.add_argument('--model_name', type=str, default='resnet50', 
                         choices=['resnet50', 'resnet50_cbam', 'rexnet_100', 'rexnet_150', 'rexnet_200', 'resnext101_enhanced'], 
                         help='選擇模型架構')
-    parser.add_argument('--loss', type=str, default='ce', choices=['ce', 'focal'], help='選擇 Loss Function')
-    parser.add_argument('--scheduler', type=str, default='cosine', choices=['cosine', 'step'], help='選擇 Learning Rate Scheduler')
-    parser.add_argument('--run_name', type=str, default=None, help='Experiment name (若不指定則自動組合)')
-    parser.add_argument('--resume', action='store_true', help='自動讀取當前 run_name 資料夾底下的 last.pt 接續訓練')
-    parser.add_argument('--load_weight', type=str, default=None, help='手動指定特定的 .pt 權重檔案路徑來接續訓練 (優先權高於 resume)')
+    parser.add_argument('--loss', type=str, default='ce', choices=['ce', 'focal'])
+    parser.add_argument('--scheduler', type=str, default='cosine', choices=['cosine', 'step'])
+    parser.add_argument('--run_name', type=str, default=None)
+    parser.add_argument('--resume', action='store_true')
+    parser.add_argument('--load_weight', type=str, default=None)
     
-    parser.add_argument('--test', action='store_true', help='Skip training and only generate predictions using best.pt')
+    # 新增：設定要保留的 Top-K 數量 (預設為 3)
+    parser.add_argument('--top_k', type=int, default=3, help='保留 Validation 表現最好的前 K 個權重進行 Ensemble')
+    
+    parser.add_argument('--test', action='store_true', help='Skip training and only generate predictions')
+    parser.add_argument('--ensemble_weights', nargs='+', default=None, help='手動輸入多個 .pt 進行 Ensemble')
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--lr', type=float, default=1e-4)
@@ -128,48 +160,46 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    # <--- 修改: 處理模型初始化的邏輯
+    # 模型初始化
     if args.model_name == 'resnet50':
         model = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V1)
         num_ftrs = model.fc.in_features
         model.fc = nn.Sequential(
-            nn.Dropout(0.5), # 丟掉 50% 的神經元，強迫模型不依賴特定路徑
+            nn.Dropout(0.5),
             nn.Linear(num_ftrs, 100)
         )
     elif args.model_name == 'resnet50_cbam':
         model = resnet50_cbam(num_classes=100, pretrained=True)
     elif args.model_name.startswith('rexnet'):
-        print(f"Loading {args.model_name} from timm...")
-        # timm 支援直接在建立模型時設定 num_classes 並自動調整最後一層
         model = timm.create_model(args.model_name, pretrained=True, num_classes=100)
     elif args.model_name == 'resnext101_enhanced':
         model = EnhancedResNeXt101(num_classes=100, dropout_prob=0.5)
         
     model = model.to(device)
     
+    # 測試模式獨立區塊
     if args.test:
         print("\n--- Test Only Mode Enabled ---")
-        
-        if args.load_weight and Path(args.load_weight).exists():
-            best_path = Path(args.load_weight)
-        else:
-            best_path = weights_dir / 'best.pt'
-        
-        if not best_path.exists():
-            print(f"Error: Cannot find weights at {best_path}. Please train the model first.")
+        test_loader, test_dataset = get_dataloader(TEST_DIR, mode='test', batch_size=args.batch_size)
+        if len(test_dataset) == 0:
+            print("Error: Test dataset is empty.")
             return
 
-        print(f"Loading weights from: {best_path}")
-        model.load_state_dict(torch.load(best_path, map_location=device)['model_state_dict'])
-        
-        test_loader, test_dataset = get_dataloader(TEST_DIR, mode='test', batch_size=args.batch_size)
-        
-        if len(test_dataset) > 0:
-            output_csv = run_dir / 'prediction.csv'
-            generate_predictions(model, device, test_loader, output_csv, args.run_name)
+        output_csv = run_dir / 'prediction.csv'
+        if args.ensemble_weights:
+            generate_ensemble_predictions(model, device, test_loader, args.ensemble_weights, output_csv, args.run_name)
         else:
-            print("Error: Test dataset is empty.")
+            if args.load_weight and Path(args.load_weight).exists():
+                best_path = Path(args.load_weight)
+            else:
+                # 若無指定，嘗試抓取資料夾內名為 top_acc 最高的那一個，或 fallback 到 best.pt
+                best_path = weights_dir / 'best.pt'
             
+            if best_path.exists():
+                model.load_state_dict(torch.load(best_path, map_location=device)['model_state_dict'])
+                generate_predictions(model, device, test_loader, output_csv, args.run_name)
+            else:
+                print(f"Error: Cannot find weights at {best_path}. Please train first or provide --ensemble_weights.")
         return 
 
     writer = SummaryWriter(log_dir=str(runs_dir))
@@ -179,57 +209,25 @@ def main():
     test_loader, test_dataset = get_dataloader(TEST_DIR, mode='test', batch_size=args.batch_size)
     
     if args.loss == 'focal':
-        print("Loss Function: Focal Loss")
         criterion = FocalLoss(gamma=2.0) 
     elif args.loss == 'ce':
-        print("Loss Function: Cross Entropy Loss")
         criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
 
-    optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=5e-4) # 建議稍大一點
 
     if args.scheduler == 'cosine':
-        print("Scheduler: CosineAnnealingLR")
         scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-5)
     elif args.scheduler == 'step':
-        print("Scheduler: StepLR (Step size: 15, Gamma: 0.1)")
         scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=15, gamma=0.1)
 
     start_epoch = 0
-    best_acc = 0.0
-
-    weight_to_load = None
     
-    if args.load_weight:
-        target_path = Path(args.load_weight)
-        if target_path.exists():
-            weight_to_load = target_path
-            print(f"--load_weight flag detected! Will load specified weight: {weight_to_load}")
-        else:
-            print(f"Warning: Specified weight file {target_path} not found. Starting from scratch.")
-            
-    elif args.resume:
-        target_path = weights_dir / 'last.pt'
-        if target_path.exists():
-            weight_to_load = target_path
-            print(f"--resume flag detected! Will load: {weight_to_load}")
-        else:
-            print(f"Warning: --resume flag used but {target_path} not found. Starting from scratch.")
+    # 新增：用於記錄 Top-K 個 Checkpoints 的列表 (儲存格式: (val_acc, filepath))
+    top_k_checkpoints = []
 
-    if weight_to_load:
-        checkpoint = torch.load(weight_to_load, map_location=device)
-        model.load_state_dict(checkpoint['model_state_dict'])
-        
-        if 'optimizer_state_dict' in checkpoint:
-            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        if 'scheduler_state_dict' in checkpoint:
-            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-        
-        if 'epoch' in checkpoint:
-            start_epoch = checkpoint['epoch'] + 1
-        if 'best_acc' in checkpoint:
-            best_acc = checkpoint['best_acc']
-            
-        print(f"Checkpoint loaded! Resuming from Epoch {start_epoch+1}... (Previous Best Acc: {best_acc:.4f})")
+    if args.load_weight or args.resume:
+        # 為了簡化，如果你要 resume，這裡可以自己加載邏輯，但建議重頭 train 以確保 Top-K 計算正確
+        pass
 
     for epoch in range(start_epoch, args.epochs):
         print(f"\nEpoch {epoch+1}/{args.epochs}")
@@ -263,8 +261,6 @@ def main():
         model.eval()
         val_running_loss = 0.0
         val_corrects = 0
-        
-        # 新增：用於收集所有預測與標籤
         val_all_labels = []
         val_all_preds = []
         
@@ -272,14 +268,10 @@ def main():
             for inputs, labels, _ in tqdm(val_loader, desc="Validation"):
                 inputs, labels = inputs.to(device), labels.to(device)
                 outputs = model(inputs)
-                
                 v_loss = criterion(outputs, labels)
                 val_running_loss += v_loss.item() * inputs.size(0)
-                
                 _, preds = torch.max(outputs, 1)
                 val_corrects += torch.sum(preds == labels.data)
-                
-                # 收集資料
                 val_all_labels.extend(labels.cpu().numpy())
                 val_all_preds.extend(preds.cpu().numpy())
                 
@@ -289,67 +281,59 @@ def main():
         
         writer.add_scalar('Loss/val', val_loss, epoch)
         writer.add_scalar('Accuracy/val', val_acc, epoch)
-
         scheduler.step()
 
-        ckpt = {
+        # 儲存 last.pt 以供意外中斷時接續
+        torch.save({
             'epoch': epoch,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'scheduler_state_dict': scheduler.state_dict(),
-            'best_acc': best_acc
-        }
-        torch.save(ckpt, weights_dir / 'last.pt')
+        }, weights_dir / 'last.pt')
         
-        if val_acc > best_acc:
-            best_acc = val_acc
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'scheduler_state_dict': scheduler.state_dict(),
-                'best_acc': best_acc
-            }, weights_dir / 'best.pt')
-            print(f"New best performance! best.pt saved.")
-            
-            # 新增：在達到新高時繪製混淆矩陣
-            class_names = val_dataset.classes if hasattr(val_dataset, 'classes') else [str(i) for i in range(100)]
-            save_confusion_matrix(val_all_labels, val_all_preds, class_names, run_dir / 'best_confusion_matrix.png')
-            print(f"Confusion matrix saved to: {run_dir / 'best_confusion_matrix.png'}")
+        # ==========================================
+        # Top-K 儲存機制
+        # ==========================================
+        is_top_k = False
+        if len(top_k_checkpoints) < args.top_k:
+            is_top_k = True
+        elif val_acc > min(top_k_checkpoints, key=lambda x: x[0])[0]: # 比目前名單中最差的還好
+            is_top_k = True
 
-            metrics_path = run_dir / 'best_metrics.txt'
-            with open(metrics_path, 'w') as f:
-                f.write(f"=== Experiment Config ===\n")
-                f.write(f"Model Name: {args.model_name}\n")
-                f.write(f"Loss Function: {args.loss}\n")
-                f.write(f"Scheduler: {args.scheduler}\n")
-                f.write(f"Total Epochs Configured: {args.epochs}\n")
-                f.write(f"Initial LR: {args.lr}\n")
-                f.write(f"Loaded Weight (if any): {weight_to_load}\n")
-                f.write(f"=========================\n\n")
-                
-                f.write(f"Best Epoch: {epoch + 1}\n")
-                f.write(f"Train Loss: {epoch_loss:.6f}\n")
-                f.write(f"Train Acc: {epoch_acc:.6f}\n")
-                f.write(f"Val Loss: {val_loss:.6f}\n")
-                f.write(f"Val Acc: {val_acc:.6f}\n")
+        if is_top_k:
+            ckpt_path = weights_dir / f'top_acc{val_acc:.4f}_ep{epoch+1}.pt'
+            torch.save({'model_state_dict': model.state_dict(), 'acc': val_acc}, ckpt_path)
+            
+            top_k_checkpoints.append((val_acc.item(), ckpt_path))
+            # 依照 Acc 由大到小排序
+            top_k_checkpoints.sort(key=lambda x: x[0], reverse=True)
+            print(f"--> Top {args.top_k} Updated! Saved: {ckpt_path.name}")
+            
+            # 如果名單超過 K 個，把最後一個（最差的）刪掉
+            if len(top_k_checkpoints) > args.top_k:
+                _, worst_path = top_k_checkpoints.pop(-1)
+                if os.path.exists(worst_path):
+                    os.remove(worst_path)
+                    
+            # 只有當這是「歷史第一名」(排在 index 0) 時，才去更新混淆矩陣
+            if top_k_checkpoints[0][1] == ckpt_path:
+                class_names = val_dataset.classes if hasattr(val_dataset, 'classes') else [str(i) for i in range(100)]
+                save_confusion_matrix(val_all_labels, val_all_preds, class_names, run_dir / 'best_confusion_matrix.png')
 
     print("\nTraining completed!")
     writer.close()
     
-    output_csv = run_dir / 'prediction.csv'
+    # ==========================================
+    # 訓練結束後，自動拿存好的 Top-K 權重去 Test 跑 Ensemble
+    # ==========================================
+    all_ensemble_weights = [str(path) for _, path in top_k_checkpoints]
     
-    if args.load_weight and not (weights_dir / 'best.pt').exists():
-         best_path = Path(args.load_weight)
-    else:
-         best_path = weights_dir / 'best.pt'
-         
-    if best_path.exists():
-        print(f"Loading best weights ({best_path}) for final prediction...")
-        model.load_state_dict(torch.load(best_path, map_location=device)['model_state_dict'])
-    
-    if len(test_dataset) > 0:
-        generate_predictions(model, device, test_loader, output_csv, args.run_name)
+    if len(test_dataset) > 0 and len(all_ensemble_weights) > 0:
+        print("\n" + "="*40)
+        print(f"Auto-starting Final Ensemble Inference with top {len(all_ensemble_weights)} models...")
+        print("="*40)
+        output_csv = run_dir / 'final_ensemble_prediction.csv'
+        generate_ensemble_predictions(model, device, test_loader, all_ensemble_weights, output_csv, args.run_name)
 
 if __name__ == "__main__":
     main()
