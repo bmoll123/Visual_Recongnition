@@ -8,18 +8,17 @@ import torch.nn as nn
 import torch.optim as optim
 from torchvision import models
 import torch.nn.functional as F
+from torch.utils.data import WeightedRandomSampler, DataLoader # 新增 WeightedRandomSampler
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 import zipfile
-import timm  # <--- 新增: 引入 timm 庫來載入 ReXNet
-
-# 新增：用於繪製混淆矩陣的套件
+import timm  
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.metrics import confusion_matrix
+from sklearn.metrics import confusion_matrix, classification_report
 
 from dataloader import get_dataloader
-from model import resnet50_cbam, EnhancedResNeXt101
+from model import resnet50_cbam, EnhancedResNeXt101, EnhancedResNeXt50, resnext50_handcraft, resnext101_handcraft
 
 
 class FocalLoss(nn.Module):
@@ -57,6 +56,51 @@ def get_class_weights(train_dir):
     weights = total_samples / (num_classes * class_counts)
     return torch.tensor(weights, dtype=torch.float32)
 
+# === [新增]：建立 WeightedRandomSampler 的輔助函式 ===
+def get_weighted_sampler(dataset):
+    print("Building WeightedRandomSampler for balanced training...")
+    # 假設 dataset 的結構是 (image, label, image_name) 或類似的 Tuple
+    # 我們需要提取出所有樣本的 label
+    targets = []
+    # 如果 dataset 有 targets 屬性 (例如 ImageFolder)，直接取用會快很多
+    if hasattr(dataset, 'targets'):
+        targets = dataset.targets
+    else:
+        # 如果沒有，只好跑迴圈收集 (會稍微花一點點時間)
+        print("  Scanning dataset labels...")
+        for _, label, _ in dataset:
+            targets.append(label)
+    
+    class_counts = np.bincount(targets) # 統計每個類別的數量
+    
+    # 計算每個類別的權重 (數量越少，權重越高)
+    class_weights = 1.0 / class_counts
+    class_weights = class_weights.astype(np.float32) # 確保型別正確
+    
+    # 為每個樣本分配對應的權重
+    sample_weights = class_weights[targets]
+    
+    # 建立 Sampler
+    sampler = WeightedRandomSampler(
+        weights=sample_weights,
+        num_samples=len(sample_weights), # 每次 epoch 抽取的樣本數等於總樣本數
+        replacement=True # 允許重複抽樣
+    )
+    print("Sampler built successfully!")
+    return sampler
+# ======================================================
+
+def save_confusion_matrix(all_labels, all_preds, class_names, save_path):
+    cm = confusion_matrix(all_labels, all_preds)
+    plt.figure(figsize=(20, 16)) 
+    sns.heatmap(cm, annot=False, cmap='Blues', xticklabels=class_names, yticklabels=class_names)
+    plt.xlabel('Predicted Labels')
+    plt.ylabel('True Labels')
+    plt.title('Confusion Matrix')
+    plt.tight_layout()
+    plt.savefig(save_path)
+    plt.close()
+
 def generate_predictions(model, device, test_loader, output_csv_path, run_name):
     model.eval()
     results = []
@@ -74,36 +118,32 @@ def generate_predictions(model, device, test_loader, output_csv_path, run_name):
     df = df.sort_values(by='image_name').reset_index(drop=True)
     
     df.to_csv(output_csv_path, index=False)
-    print(f"Predictions saved to: {output_csv_path}")
+    print(f"\nPredictions saved to: {output_csv_path}")
     
     output_zip_path = Path(output_csv_path).parent / f"{run_name}.zip"
     with zipfile.ZipFile(output_zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
         zipf.write(output_csv_path, arcname=Path(output_csv_path).name)
-    print(f"Zipped prediction saved to: {output_zip_path}")
+    print(f"Zipped prediction saved to: {output_zip_path}\n")
 
-# 新增：繪製混淆矩陣的函式
-def save_confusion_matrix(all_labels, all_preds, class_names, save_path):
-    cm = confusion_matrix(all_labels, all_preds)
-    plt.figure(figsize=(20, 16)) # 100類需要較大尺寸
-    sns.heatmap(cm, annot=False, cmap='Blues', xticklabels=class_names, yticklabels=class_names)
-    plt.xlabel('Predicted Labels')
-    plt.ylabel('True Labels')
-    plt.title('Confusion Matrix')
-    plt.tight_layout()
-    plt.savefig(save_path)
-    plt.close()
 
 def main():
     parser = argparse.ArgumentParser()
-    # <--- 修改: 將 rexnet 的不同寬度版本加入 choices 中
     parser.add_argument('--model_name', type=str, default='resnet50', 
-                        choices=['resnet50', 'resnet50_cbam', 'rexnet_100', 'rexnet_150', 'rexnet_200', 'resnext101_enhanced'], 
-                        help='選擇模型架構')
+                    choices=[
+                        'resnet50', 'resnet50_cbam', 
+                        'rexnet_100', 'rexnet_150', 'rexnet_200', 
+                        'resnext101_enhanced', 'resnext50_enhanced',
+                        'resnext50_handcraft', 'resnext101_handcraft' 
+                    ], 
+                    help='選擇模型架構')
     parser.add_argument('--loss', type=str, default='ce', choices=['ce', 'focal'], help='選擇 Loss Function')
     parser.add_argument('--scheduler', type=str, default='cosine', choices=['cosine', 'step'], help='選擇 Learning Rate Scheduler')
     parser.add_argument('--run_name', type=str, default=None, help='Experiment name (若不指定則自動組合)')
     parser.add_argument('--resume', action='store_true', help='自動讀取當前 run_name 資料夾底下的 last.pt 接續訓練')
     parser.add_argument('--load_weight', type=str, default=None, help='手動指定特定的 .pt 權重檔案路徑來接續訓練 (優先權高於 resume)')
+    
+    # === [新增]：控制是否使用 WeightedRandomSampler 的參數 ===
+    parser.add_argument('--use_sampler', action='store_true', help='使用 WeightedRandomSampler 解決資料不平衡問題')
     
     parser.add_argument('--test', action='store_true', help='Skip training and only generate predictions using best.pt')
     parser.add_argument('--epochs', type=int, default=50)
@@ -111,10 +151,12 @@ def main():
     parser.add_argument('--lr', type=float, default=1e-4)
     args = parser.parse_args()
     
-    args.run_name = f"{args.run_name}_{args.model_name}_{args.loss}_{args.scheduler}_{args.lr}_{args.epochs}_{args.batch_size}"
+    # 稍微修改 run_name，把 sampler 的資訊也加進去方便辨識
+    sampler_str = "sampler" if args.use_sampler else "nosampler"
+    args.run_name = f"{args.run_name}_{args.model_name}_{args.loss}_{sampler_str}_{args.scheduler}_{args.lr}_{args.epochs}_{args.batch_size}"
     print(f"\nExperiment Run Name: {args.run_name}")
 
-    run_dir = Path('./results') / args.run_name
+    run_dir = Path('./0329_results') / args.run_name
     weights_dir = run_dir / 'weights'
     runs_dir = run_dir / 'runs'
     
@@ -128,30 +170,40 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    # <--- 修改: 處理模型初始化的邏輯
     if args.model_name == 'resnet50':
         model = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V1)
         num_ftrs = model.fc.in_features
         model.fc = nn.Sequential(
-            nn.Dropout(0.5), # 丟掉 50% 的神經元，強迫模型不依賴特定路徑
+            nn.Dropout(0.5), 
             nn.Linear(num_ftrs, 100)
         )
     elif args.model_name == 'resnet50_cbam':
         model = resnet50_cbam(num_classes=100, pretrained=True)
     elif args.model_name.startswith('rexnet'):
         print(f"Loading {args.model_name} from timm...")
-        # timm 支援直接在建立模型時設定 num_classes 並自動調整最後一層
         model = timm.create_model(args.model_name, pretrained=True, num_classes=100)
     elif args.model_name == 'resnext101_enhanced':
         model = EnhancedResNeXt101(num_classes=100, dropout_prob=0.5)
+    elif args.model_name == 'resnext50_enhanced':
+        model = EnhancedResNeXt50(num_classes=100, dropout_prob=0.5)
+    elif args.model_name == 'resnext50_handcraft':
+        print("Loading Handcrafted ResNeXt50 with Pretrained Weights...")
+        model = resnext50_handcraft(num_classes=100, dropout_prob=0.5, pretrained=True)
+    elif args.model_name == 'resnext101_handcraft':
+        print("Loading Handcrafted ResNeXt101 with Pretrained Weights...")
+        model = resnext101_handcraft(num_classes=100, dropout_prob=0.5, pretrained=True)
         
     model = model.to(device)
     
+    # Test Only Mode
     if args.test:
         print("\n--- Test Only Mode Enabled ---")
         
         if args.load_weight and Path(args.load_weight).exists():
             best_path = Path(args.load_weight)
+            run_dir = best_path.parent.parent
+            args.run_name = run_dir.name  
+            print(f"Output directory automatically set to: {run_dir}")
         else:
             best_path = weights_dir / 'best.pt'
         
@@ -162,6 +214,38 @@ def main():
         print(f"Loading weights from: {best_path}")
         model.load_state_dict(torch.load(best_path, map_location=device)['model_state_dict'])
         
+        val_loader, val_dataset = get_dataloader(VAL_DIR, mode='val', batch_size=args.batch_size)
+        
+        print("\nEvaluating on Validation Set to generate metrics...")
+        model.eval()
+        val_all_labels = []
+        val_all_preds = []
+        
+        with torch.no_grad():
+            for inputs, labels, _ in tqdm(val_loader, desc="Validation"):
+                inputs = inputs.to(device)
+                outputs = model(inputs)
+                _, preds = torch.max(outputs, 1)
+                
+                val_all_labels.extend(labels.numpy())
+                val_all_preds.extend(preds.cpu().numpy())
+                
+        class_names = val_dataset.classes if hasattr(val_dataset, 'classes') else [str(i) for i in range(100)]
+        
+        save_confusion_matrix(val_all_labels, val_all_preds, class_names, run_dir / 'best_confusion_matrix.png')
+        
+        report = classification_report(val_all_labels, val_all_preds, target_names=class_names, digits=4, zero_division=0)
+        val_acc = (np.array(val_all_labels) == np.array(val_all_preds)).mean()
+        
+        metrics_path = run_dir / 'best_metrics.txt'
+        with open(metrics_path, 'w', encoding='utf-8') as f:
+            f.write(f"=== Test Mode: Validation Set Evaluation ===\n")
+            f.write(f"Loaded Weight: {best_path}\n")
+            f.write(f"Validation Accuracy: {val_acc:.6f}\n\n")
+            f.write(f"=== Classification Report (Per-Class) ===\n")
+            f.write(report)
+        print(f"Validation metrics saved to: {metrics_path}")
+
         test_loader, test_dataset = get_dataloader(TEST_DIR, mode='test', batch_size=args.batch_size)
         
         if len(test_dataset) > 0:
@@ -170,26 +254,47 @@ def main():
         else:
             print("Error: Test dataset is empty.")
             
-        return 
+        return
 
+    # Training Mode
     writer = SummaryWriter(log_dir=str(runs_dir))
 
-    train_loader, train_dataset = get_dataloader(TRAIN_DIR, mode='train', batch_size=args.batch_size)
+    # 先取得 dataset
+    train_loader_original, train_dataset = get_dataloader(TRAIN_DIR, mode='train', batch_size=args.batch_size)
     val_loader, val_dataset = get_dataloader(VAL_DIR, mode='val', batch_size=args.batch_size)
     test_loader, test_dataset = get_dataloader(TEST_DIR, mode='test', batch_size=args.batch_size)
     
+    # === [新增]：如果啟用 Sampler，則重新建構 DataLoader ===
+    if args.use_sampler:
+        sampler = get_weighted_sampler(train_dataset)
+        # 注意：使用 sampler 時，shuffle 必須是 False
+        # 取出 original dataloader 中的 num_workers 等設定來保持一致
+        train_loader = DataLoader(
+            train_dataset, 
+            batch_size=args.batch_size, 
+            sampler=sampler, 
+            num_workers=train_loader_original.num_workers,
+            pin_memory=train_loader_original.pin_memory
+        )
+        print("Using WeightedRandomSampler for Training DataLoader.")
+        class_weights = None
+    else:
+        train_loader = train_loader_original
+        print("Using standard Training DataLoader (Shuffle=True).")
+        class_weights = get_class_weights(TRAIN_DIR).to(device)
+    
     if args.loss == 'focal':
         print("Loss Function: Focal Loss")
-        criterion = FocalLoss(gamma=2.0) 
+        criterion = FocalLoss(gamma=2.0, alpha=class_weights) 
     elif args.loss == 'ce':
         print("Loss Function: Cross Entropy Loss")
-        criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
+        criterion = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=0.1)
 
-    optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-3)
 
     if args.scheduler == 'cosine':
         print("Scheduler: CosineAnnealingLR")
-        scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-5)
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-7)
     elif args.scheduler == 'step':
         print("Scheduler: StepLR (Step size: 15, Gamma: 0.1)")
         scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=15, gamma=0.1)
@@ -259,12 +364,10 @@ def main():
         writer.add_scalar('Accuracy/train', epoch_acc, epoch)
         writer.add_scalar('LR', curr_lr, epoch)
         
-        # --- Validation stage ---
         model.eval()
         val_running_loss = 0.0
         val_corrects = 0
         
-        # 新增：用於收集所有預測與標籤
         val_all_labels = []
         val_all_preds = []
         
@@ -279,7 +382,6 @@ def main():
                 _, preds = torch.max(outputs, 1)
                 val_corrects += torch.sum(preds == labels.data)
                 
-                # 收集資料
                 val_all_labels.extend(labels.cpu().numpy())
                 val_all_preds.extend(preds.cpu().numpy())
                 
@@ -312,19 +414,21 @@ def main():
             }, weights_dir / 'best.pt')
             print(f"New best performance! best.pt saved.")
             
-            # 新增：在達到新高時繪製混淆矩陣
             class_names = val_dataset.classes if hasattr(val_dataset, 'classes') else [str(i) for i in range(100)]
+            
             save_confusion_matrix(val_all_labels, val_all_preds, class_names, run_dir / 'best_confusion_matrix.png')
-            print(f"Confusion matrix saved to: {run_dir / 'best_confusion_matrix.png'}")
-
+            
+            report = classification_report(val_all_labels, val_all_preds, target_names=class_names, digits=4, zero_division=0)
+            
             metrics_path = run_dir / 'best_metrics.txt'
-            with open(metrics_path, 'w') as f:
+            with open(metrics_path, 'w', encoding='utf-8') as f:
                 f.write(f"=== Experiment Config ===\n")
                 f.write(f"Model Name: {args.model_name}\n")
                 f.write(f"Loss Function: {args.loss}\n")
                 f.write(f"Scheduler: {args.scheduler}\n")
                 f.write(f"Total Epochs Configured: {args.epochs}\n")
                 f.write(f"Initial LR: {args.lr}\n")
+                f.write(f"Used Sampler: {args.use_sampler}\n")
                 f.write(f"Loaded Weight (if any): {weight_to_load}\n")
                 f.write(f"=========================\n\n")
                 
@@ -332,7 +436,10 @@ def main():
                 f.write(f"Train Loss: {epoch_loss:.6f}\n")
                 f.write(f"Train Acc: {epoch_acc:.6f}\n")
                 f.write(f"Val Loss: {val_loss:.6f}\n")
-                f.write(f"Val Acc: {val_acc:.6f}\n")
+                f.write(f"Val Acc: {val_acc:.6f}\n\n")
+                
+                f.write(f"=== Classification Report (Per-Class) ===\n")
+                f.write(report)
 
     print("\nTraining completed!")
     writer.close()
@@ -345,7 +452,7 @@ def main():
          best_path = weights_dir / 'best.pt'
          
     if best_path.exists():
-        print(f"Loading best weights ({best_path}) for final prediction...")
+        print(f"\nLoading best weights ({best_path}) for final prediction...")
         model.load_state_dict(torch.load(best_path, map_location=device)['model_state_dict'])
     
     if len(test_dataset) > 0:
