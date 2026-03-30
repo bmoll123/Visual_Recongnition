@@ -1,32 +1,154 @@
 import os
 import argparse
-from pathlib import Path
-
+import pandas as pd
 import numpy as np
+from pathlib import Path
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torchvision import models
-from torch.utils.data import DataLoader
+import torch.nn.functional as F
+from torch.utils.data import (
+    WeightedRandomSampler,
+    DataLoader,
+)  # 新增 WeightedRandomSampler
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
+import zipfile
 import timm
-from sklearn.metrics import classification_report
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.metrics import confusion_matrix, classification_report
 
+from dataloader import get_dataloader
 from model import (
+    resnet50_cbam,
     EnhancedResNeXt101,
     EnhancedResNeXt50,
     resnext50_handcraft,
     resnext101_handcraft,
 )
-from dataloader import get_dataloader
-from utils import (
-    FocalLoss,
-    get_class_weights,
-    get_weighted_sampler,
-    save_confusion_matrix,
-    generate_predictions,
-)
+
+
+class FocalLoss(nn.Module):
+    def __init__(self, gamma=2.0, alpha=None, reduction="mean"):
+        super(FocalLoss, self).__init__()
+        self.gamma = gamma
+        self.alpha = alpha
+        self.reduction = reduction
+
+    def forward(self, inputs, targets):
+        ce_loss = F.cross_entropy(inputs, targets, weight=self.alpha, reduction="none")
+        pt = torch.exp(-ce_loss)
+        focal_loss = ((1 - pt) ** self.gamma) * ce_loss
+
+        if self.reduction == "mean":
+            return focal_loss.mean()
+        elif self.reduction == "sum":
+            return focal_loss.sum()
+        else:
+            return focal_loss
+
+
+def get_class_weights(train_dir):
+    class_names = sorted(
+        [d for d in os.listdir(train_dir) if os.path.isdir(os.path.join(train_dir, d))]
+    )
+    num_classes = len(class_names)
+
+    class_counts = []
+    for class_name in class_names:
+        class_path = os.path.join(train_dir, class_name)
+        num_files = len(
+            [
+                f
+                for f in os.listdir(class_path)
+                if os.path.isfile(os.path.join(class_path, f))
+            ]
+        )
+        class_counts.append(num_files)
+
+    class_counts = np.array(class_counts)
+    total_samples = np.sum(class_counts)
+
+    weights = total_samples / (num_classes * class_counts)
+    return torch.tensor(weights, dtype=torch.float32)
+
+
+# === [新增]：建立 WeightedRandomSampler 的輔助函式 ===
+def get_weighted_sampler(dataset):
+    print("Building WeightedRandomSampler for balanced training...")
+    # 假設 dataset 的結構是 (image, label, image_name) 或類似的 Tuple
+    # 我們需要提取出所有樣本的 label
+    targets = []
+    # 如果 dataset 有 targets 屬性 (例如 ImageFolder)，直接取用會快很多
+    if hasattr(dataset, "targets"):
+        targets = dataset.targets
+    else:
+        # 如果沒有，只好跑迴圈收集 (會稍微花一點點時間)
+        print("  Scanning dataset labels...")
+        for _, label, _ in dataset:
+            targets.append(label)
+
+    class_counts = np.bincount(targets)  # 統計每個類別的數量
+
+    # 計算每個類別的權重 (數量越少，權重越高)
+    class_weights = 1.0 / class_counts
+    class_weights = class_weights.astype(np.float32)  # 確保型別正確
+
+    # 為每個樣本分配對應的權重
+    sample_weights = class_weights[targets]
+
+    # 建立 Sampler
+    sampler = WeightedRandomSampler(
+        weights=sample_weights,
+        num_samples=5 * len(sample_weights),  # 每次 epoch 抽取的樣本數等於總樣本數
+        replacement=True,  # 允許重複抽樣
+    )
+    print("Sampler built successfully!")
+    return sampler
+
+
+# ======================================================
+
+
+def save_confusion_matrix(all_labels, all_preds, class_names, save_path):
+    cm = confusion_matrix(all_labels, all_preds)
+    plt.figure(figsize=(20, 16))
+    sns.heatmap(
+        cm, annot=False, cmap="Blues", xticklabels=class_names, yticklabels=class_names
+    )
+    plt.xlabel("Predicted Labels")
+    plt.ylabel("True Labels")
+    plt.title("Confusion Matrix")
+    plt.tight_layout()
+    plt.savefig(save_path)
+    plt.close()
+
+
+def generate_predictions(model, device, test_loader, output_csv_path, run_name):
+    model.eval()
+    results = []
+
+    with torch.no_grad():
+        for inputs, _, img_names in tqdm(test_loader, desc="Generating Predictions"):
+            inputs = inputs.to(device)
+            outputs = model(inputs)
+            _, preds = torch.max(outputs, 1)
+
+            for img_name, pred in zip(img_names, preds):
+                results.append({"image_name": img_name, "pred_label": pred.item()})
+
+    df = pd.DataFrame(results)
+    df = df.sort_values(by="image_name").reset_index(drop=True)
+
+    df.to_csv(output_csv_path, index=False)
+    print(f"\nPredictions saved to: {output_csv_path}")
+
+    output_zip_path = Path(output_csv_path).parent / f"{run_name}.zip"
+    with zipfile.ZipFile(output_zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
+        zipf.write(output_csv_path, arcname=Path(output_csv_path).name)
+    print(f"Zipped prediction saved to: {output_zip_path}\n")
 
 
 def main():
@@ -34,9 +156,10 @@ def main():
     parser.add_argument(
         "--model_name",
         type=str,
-        default="resnext101_handcraft",
+        default="resnet50",
         choices=[
             "resnet50",
+            "resnet50_cbam",
             "rexnet_100",
             "rexnet_150",
             "rexnet_200",
@@ -64,7 +187,7 @@ def main():
     parser.add_argument(
         "--run_name",
         type=str,
-        default="Run",
+        default=None,
         help="Experiment name (若不指定則自動組合)",
     )
     parser.add_argument(
@@ -78,24 +201,35 @@ def main():
         default=None,
         help="手動指定特定的 .pt 權重檔案路徑來接續訓練 (優先權高於 resume)",
     )
+
+    # === [新增]：控制是否使用 WeightedRandomSampler 的參數 ===
     parser.add_argument(
         "--use_sampler",
         action="store_true",
         help="使用 WeightedRandomSampler 解決資料不平衡問題",
     )
-    parser.add_argument("--test", action="store_true", help="跑test")
-    parser.add_argument("--epochs", type=int, default=100)
+
+    parser.add_argument(
+        "--test",
+        action="store_true",
+        help="Skip training and only generate predictions using best.pt",
+    )
+    parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=1e-4)
     args = parser.parse_args()
 
+    # 稍微修改 run_name，把 sampler 的資訊也加進去方便辨識
     sampler_str = "sampler" if args.use_sampler else "nosampler"
-    args.run_name = f"{args.run_name}_{args.model_name}_{args.loss}_{sampler_str}"
+    args.run_name = f"{args.run_name}_{args.model_name}_{args.loss}_{sampler_str}_{args.scheduler}_{args.lr}_{args.epochs}_{args.batch_size}"
     print(f"\nExperiment Run Name: {args.run_name}")
 
-    run_dir = Path("./Results") / args.run_name
+    run_dir = Path("./0330_results") / args.run_name
     weights_dir = run_dir / "weights"
     runs_dir = run_dir / "runs"
+
+    weights_dir.mkdir(parents=True, exist_ok=True)
+    runs_dir.mkdir(parents=True, exist_ok=True)
 
     TRAIN_DIR = "./data/train"
     VAL_DIR = "./data/val"
@@ -126,15 +260,19 @@ def main():
 
     model = model.to(device)
 
+    # Test Only Mode
     if args.test:
-        print("\n--- Test Only Mode Enabled (Validation Set)---")
+        print("\n--- Test Only Mode Enabled ---")
 
         if args.load_weight and Path(args.load_weight).exists():
             best_path = Path(args.load_weight)
             run_dir = best_path.parent.parent
             args.run_name = run_dir.name
-            print(f"Output directory: {run_dir}")
+            print(f"Output directory automatically set to: {run_dir}")
         else:
+            best_path = weights_dir / "best.pt"
+
+        if not best_path.exists():
             print(
                 f"Error: Cannot find weights at {best_path}. Please train the model first."
             )
@@ -149,6 +287,7 @@ def main():
             VAL_DIR, mode="val", batch_size=args.batch_size
         )
 
+        print("\nEvaluating on Validation Set to generate metrics...")
         model.eval()
         val_all_labels = []
         val_all_preds = []
@@ -184,7 +323,7 @@ def main():
         )
         val_acc = (np.array(val_all_labels) == np.array(val_all_preds)).mean()
 
-        metrics_path = run_dir / "validation_metrics.txt"
+        metrics_path = run_dir / "best_metrics.txt"
         with open(metrics_path, "w", encoding="utf-8") as f:
             f.write(f"=== Test Mode: Validation Set Evaluation ===\n")
             f.write(f"Loaded Weight: {best_path}\n")
@@ -205,11 +344,10 @@ def main():
 
         return
 
-    weights_dir.mkdir(parents=True, exist_ok=True)
-    runs_dir.mkdir(parents=True, exist_ok=True)
-
+    # Training Mode
     writer = SummaryWriter(log_dir=str(runs_dir))
 
+    # 先取得 dataset
     train_loader_original, train_dataset = get_dataloader(
         TRAIN_DIR, mode="train", batch_size=args.batch_size
     )
@@ -220,8 +358,11 @@ def main():
         TEST_DIR, mode="test", batch_size=args.batch_size
     )
 
+    # === [新增]：如果啟用 Sampler，則重新建構 DataLoader ===
     if args.use_sampler:
         sampler = get_weighted_sampler(train_dataset)
+        # 注意：使用 sampler 時，shuffle 必須是 False
+        # 取出 original dataloader 中的 num_workers 等設定來保持一致
         train_loader = DataLoader(
             train_dataset,
             batch_size=args.batch_size,
