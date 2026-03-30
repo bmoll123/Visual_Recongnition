@@ -108,8 +108,6 @@ def main():
         model = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V1)
         num_ftrs = model.fc.in_features
         model.fc = nn.Sequential(nn.Dropout(0.5), nn.Linear(num_ftrs, 100))
-    elif args.model_name == "resnet50_cbam":
-        model = resnet50_cbam(num_classes=100, pretrained=True)
     elif args.model_name.startswith("rexnet"):
         print(f"Loading {args.model_name} from timm...")
         model = timm.create_model(args.model_name, pretrained=True, num_classes=100)

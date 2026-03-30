@@ -35,7 +35,7 @@ python train.py \
 python train.py \
     --test \
     --model_name resnext101_handcraft \
-    --load_weight
+    --load_weight ./Results/Run_resnext101_handcraft_focal_sampler/weights/last.pt
 ```
 
 ## Performance Snapshot
