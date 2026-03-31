@@ -5,86 +5,6 @@ from torchvision.models import ResNeXt101_32X8D_Weights, resnext101_32x8d
 from torchvision.models import ResNeXt50_32X4D_Weights, resnext50_32x4d
 
 
-class EnhancedResNeXt101(nn.Module):
-    def __init__(self, num_classes=100, dropout_prob=0.5):
-        super(EnhancedResNeXt101, self).__init__()
-        base_model = models.resnext101_32x8d(
-            weights=ResNeXt101_32X8D_Weights.IMAGENET1K_V2
-        )
-        self.features = nn.Sequential(*list(base_model.children())[:-2])
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        self.channel_attention = nn.Sequential(
-            nn.Linear(2048, 2048 // 16),
-            nn.ReLU(inplace=True),
-            nn.Linear(2048 // 16, 2048),
-            nn.Sigmoid(),
-        )
-        self.classifier = nn.Sequential(
-            nn.Dropout(p=dropout_prob), nn.Linear(2048, num_classes)
-        )
-        self._initialize_weights()
-
-    def _initialize_weights(self):
-        for m in self.channel_attention.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-        for m in self.classifier.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-
-    def forward(self, x):
-        x = self.features(x)
-        x_pool = self.avg_pool(x).view(x.size(0), -1)
-        att = self.channel_attention(x_pool)
-        x_att = x_pool * att
-        out = self.classifier(x_att)
-        return out
-
-
-class EnhancedResNeXt50(nn.Module):
-    def __init__(self, num_classes=100, dropout_prob=0.5):
-        super(EnhancedResNeXt50, self).__init__()
-        base_model = models.resnext50_32x4d(
-            weights=ResNeXt50_32X4D_Weights.IMAGENET1K_V1
-        )
-        self.features = nn.Sequential(*list(base_model.children())[:-2])
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        self.channel_attention = nn.Sequential(
-            nn.Linear(2048, 2048 // 16),
-            nn.ReLU(inplace=True),
-            nn.Linear(2048 // 16, 2048),
-            nn.Sigmoid(),
-        )
-        self.classifier = nn.Sequential(
-            nn.Dropout(p=dropout_prob), nn.Linear(2048, num_classes)
-        )
-        self._initialize_weights()
-
-    def _initialize_weights(self):
-        for m in self.channel_attention.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-        for m in self.classifier.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-
-    def forward(self, x):
-        x = self.features(x)
-        x_pool = self.avg_pool(x).view(x.size(0), -1)
-        att = self.channel_attention(x_pool)
-        x_att = x_pool * att
-        out = self.classifier(x_att)
-        return out
-
-
 class ResNeXtBottleneck(nn.Module):
 
     expansion = 4
@@ -147,10 +67,10 @@ class ResNeXtBottleneck(nn.Module):
         return out
 
 
-class ResNeXt50_Handcraft(nn.Module):
+class ResNeXt50_se(nn.Module):
 
     def __init__(self, num_classes=100, dropout_prob=0.5, groups=32, width_per_group=4):
-        super(ResNeXt50_Handcraft, self).__init__()
+        super(ResNeXt50_se, self).__init__()
         self.in_channels = 64
         self.groups = groups
         self.base_width = width_per_group
@@ -241,10 +161,10 @@ class ResNeXt50_Handcraft(nn.Module):
         return out
 
 
-class ResNeXt101_Handcraft(nn.Module):
+class ResNeXt101_se(nn.Module):
 
     def __init__(self, num_classes=100, dropout_prob=0.5, groups=32, width_per_group=8):
-        super(ResNeXt101_Handcraft, self).__init__()
+        super(ResNeXt101_se, self).__init__()
         self.in_channels = 64
         self.groups = groups
         self.base_width = width_per_group
@@ -335,8 +255,8 @@ class ResNeXt101_Handcraft(nn.Module):
         return out
 
 
-def resnext50_handcraft(num_classes=100, dropout_prob=0.5, pretrained=True):
-    model = ResNeXt50_Handcraft(num_classes=num_classes, dropout_prob=dropout_prob)
+def resnext50_se(num_classes=100, dropout_prob=0.5, pretrained=True):
+    model = ResNeXt50_se(num_classes=num_classes, dropout_prob=dropout_prob)
 
     if pretrained:
         base_model = resnext50_32x4d(weights=ResNeXt50_32X4D_Weights.IMAGENET1K_V1)
@@ -352,8 +272,8 @@ def resnext50_handcraft(num_classes=100, dropout_prob=0.5, pretrained=True):
     return model
 
 
-def resnext101_handcraft(num_classes=100, dropout_prob=0.5, pretrained=True):
-    model = ResNeXt101_Handcraft(
+def resnext101_se(num_classes=100, dropout_prob=0.5, pretrained=True):
+    model = ResNeXt101_se(
         num_classes=num_classes, dropout_prob=dropout_prob, groups=32, width_per_group=8
     )
 

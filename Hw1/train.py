@@ -14,10 +14,8 @@ import timm
 from sklearn.metrics import classification_report
 
 from model import (
-    EnhancedResNeXt101,
-    EnhancedResNeXt50,
-    resnext50_handcraft,
-    resnext101_handcraft,
+    resnext50_se,
+    resnext101_se,
 )
 from dataloader import get_dataloader
 from utils import (
@@ -34,16 +32,14 @@ def main():
     parser.add_argument(
         "--model_name",
         type=str,
-        default="resnext101_handcraft",
+        default="resnext101_se",
         choices=[
             "resnet50",
-            "rexnet_100",
-            "rexnet_150",
-            "rexnet_200",
-            "resnext101_enhanced",
-            "resnext50_enhanced",
-            "resnext50_handcraft",
-            "resnext101_handcraft",
+            "resnet101",
+            "resnext50",
+            "resnext101",
+            "resnext50_se",
+            "resnext101_se",
         ],
         help="選擇模型架構",
     )
@@ -108,19 +104,31 @@ def main():
         model = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V1)
         num_ftrs = model.fc.in_features
         model.fc = nn.Sequential(nn.Dropout(0.5), nn.Linear(num_ftrs, 100))
-    elif args.model_name.startswith("rexnet"):
-        print(f"Loading {args.model_name} from timm...")
-        model = timm.create_model(args.model_name, pretrained=True, num_classes=100)
-    elif args.model_name == "resnext101_enhanced":
-        model = EnhancedResNeXt101(num_classes=100, dropout_prob=0.5)
-    elif args.model_name == "resnext50_enhanced":
-        model = EnhancedResNeXt50(num_classes=100, dropout_prob=0.5)
-    elif args.model_name == "resnext50_handcraft":
+    elif args.model_name == "resnet101":
+        model = models.resnet101(weights=models.ResNet101_Weights.IMAGENET1K_V1)
+        num_ftrs = model.fc.in_features
+        model.fc = nn.Sequential(nn.Dropout(0.5), nn.Linear(num_ftrs, 100))
+    elif args.model_name == "resnext50":
+        print("Loading Standard ResNeXt50_32x4d...")
+        model = models.resnext50_32x4d(
+            weights=models.ResNeXt50_32X4D_Weights.IMAGENET1K_V1
+        )
+        num_ftrs = model.fc.in_features
+        model.fc = nn.Sequential(nn.Dropout(0.5), nn.Linear(num_ftrs, 100))
+
+    elif args.model_name == "resnext101":
+        print("Loading Standard ResNeXt101_32x8d...")
+        model = models.resnext101_32x8d(
+            weights=models.ResNeXt101_32X8D_Weights.IMAGENET1K_V2
+        )
+        num_ftrs = model.fc.in_features
+        model.fc = nn.Sequential(nn.Dropout(0.5), nn.Linear(num_ftrs, 100))
+    elif args.model_name == "resnext50_se":
         print("Loading Handcrafted ResNeXt50 with Pretrained Weights...")
-        model = resnext50_handcraft(num_classes=100, dropout_prob=0.5, pretrained=True)
-    elif args.model_name == "resnext101_handcraft":
+        model = resnext50_se(num_classes=100, dropout_prob=0.5, pretrained=True)
+    elif args.model_name == "resnext101_se":
         print("Loading Handcrafted ResNeXt101 with Pretrained Weights...")
-        model = resnext101_handcraft(num_classes=100, dropout_prob=0.5, pretrained=True)
+        model = resnext101_se(num_classes=100, dropout_prob=0.5, pretrained=True)
 
     model = model.to(device)
 
