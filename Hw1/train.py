@@ -431,21 +431,73 @@ def main():
     print("\nTraining completed!")
     writer.close()
 
-    output_csv = run_dir / "prediction.csv"
-
     if args.load_weight and not (weights_dir / "best.pt").exists():
         best_path = Path(args.load_weight)
     else:
         best_path = weights_dir / "best.pt"
 
     if best_path.exists():
-        print(f"\nLoading best weights ({best_path}) for final prediction...")
+        print(f"\n--- Loading best weights ({best_path}) for final prediction ---")
         model.load_state_dict(
             torch.load(best_path, map_location=device)["model_state_dict"]
         )
+        if len(test_dataset) > 0:
+            output_csv = run_dir / "best_prediction.csv"
+            best_run_name = f"best_{args.run_name}"
+            generate_predictions(model, device, test_loader, output_csv, best_run_name)
 
-    if len(test_dataset) > 0:
-        generate_predictions(model, device, test_loader, output_csv, args.run_name)
+    last_path = weights_dir / "last.pt"
+
+    if last_path.exists():
+        print(
+            f"\n--- Loading last weights ({last_path}) for validation & prediction ---"
+        )
+        model.load_state_dict(
+            torch.load(last_path, map_location=device)["model_state_dict"]
+        )
+
+        model.eval()
+        val_all_labels = []
+        val_all_preds = []
+
+        with torch.no_grad():
+            for inputs, labels, _ in tqdm(val_loader, desc="Validation (Last Model)"):
+                inputs, labels = inputs.to(device), labels.to(device)
+                outputs = model(inputs)
+                _, preds = torch.max(outputs, 1)
+
+                val_all_labels.extend(labels.cpu().numpy())
+                val_all_preds.extend(preds.cpu().numpy())
+
+        class_names = (
+            val_dataset.classes
+            if hasattr(val_dataset, "classes")
+            else [str(i) for i in range(100)]
+        )
+
+        report = classification_report(
+            val_all_labels,
+            val_all_preds,
+            target_names=class_names,
+            digits=4,
+            zero_division=0,
+        )
+        val_acc = (np.array(val_all_labels) == np.array(val_all_preds)).mean()
+
+        metrics_path = run_dir / "last_metrics.txt"
+        with open(metrics_path, "w", encoding="utf-8") as f:
+            f.write(f"=== Last Epoch Validation Metrics ===\n")
+            f.write(f"Validation Accuracy: {val_acc:.6f}\n\n")
+            f.write(f"=== Classification Report (Per-Class) ===\n")
+            f.write(report)
+        print(f"Last validation metrics saved to: {metrics_path}")
+
+        if len(test_dataset) > 0:
+            last_output_csv = run_dir / "last_prediction.csv"
+            last_run_name = f"last_{args.run_name}"
+            generate_predictions(
+                model, device, test_loader, last_output_csv, last_run_name
+            )
 
 
 if __name__ == "__main__":
