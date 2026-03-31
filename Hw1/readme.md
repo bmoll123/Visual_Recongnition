@@ -45,4 +45,5 @@ python train.py \
 ```
 
 ## Performance Snapshot
+<img width="1155" height="46" alt="截圖 2026-03-31 晚上9 08 03" src="https://github.com/user-attachments/assets/c094d377-5efd-4f79-884c-4a7b789b53ec" />
 
