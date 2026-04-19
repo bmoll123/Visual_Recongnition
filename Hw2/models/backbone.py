@@ -32,15 +32,29 @@ class FrozenBatchNorm2d(torch.nn.Module):
         self.register_buffer("running_mean", torch.zeros(n))
         self.register_buffer("running_var", torch.ones(n))
 
-    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
-                              missing_keys, unexpected_keys, error_msgs):
-        num_batches_tracked_key = prefix + 'num_batches_tracked'
+    def _load_from_state_dict(
+        self,
+        state_dict,
+        prefix,
+        local_metadata,
+        strict,
+        missing_keys,
+        unexpected_keys,
+        error_msgs,
+    ):
+        num_batches_tracked_key = prefix + "num_batches_tracked"
         if num_batches_tracked_key in state_dict:
             del state_dict[num_batches_tracked_key]
 
         super(FrozenBatchNorm2d, self)._load_from_state_dict(
-            state_dict, prefix, local_metadata, strict,
-            missing_keys, unexpected_keys, error_msgs)
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
+        )
 
     def forward(self, x):
         # move reshapes to the beginning
@@ -55,17 +69,34 @@ class FrozenBatchNorm2d(torch.nn.Module):
         return x * scale + bias
 
 
-class BackboneBase(nn.Module):
+# ... 前面的 FrozenBatchNorm2d 保持原樣不變 ...
 
-    def __init__(self, backbone: nn.Module, train_backbone: bool, num_channels: int, return_interm_layers: bool):
+
+class BackboneBase(nn.Module):
+    def __init__(
+        self,
+        backbone: nn.Module,
+        train_backbone: bool,
+        num_channels: list,
+        return_interm_layers: bool,
+    ):
+        # 🌟 修改 1: num_channels 的型別提示變成 list
         super().__init__()
         for name, parameter in backbone.named_parameters():
-            if not train_backbone or 'layer2' not in name and 'layer3' not in name and 'layer4' not in name:
+            if (
+                not train_backbone
+                or "layer2" not in name
+                and "layer3" not in name
+                and "layer4" not in name
+            ):
                 parameter.requires_grad_(False)
+
         if return_interm_layers:
-            return_layers = {"layer1": "0", "layer2": "1", "layer3": "2", "layer4": "3"}
+            # 🌟 修改 2: Deformable DETR 通常使用 C3, C4, C5 (即 layer2, layer3, layer4)
+            return_layers = {"layer2": "0", "layer3": "1", "layer4": "2"}
         else:
-            return_layers = {'layer4': "0"}
+            return_layers = {"layer4": "0"}
+
         self.body = IntermediateLayerGetter(backbone, return_layers=return_layers)
         self.num_channels = num_channels
 
@@ -82,18 +113,35 @@ class BackboneBase(nn.Module):
 
 class Backbone(BackboneBase):
     """ResNet backbone with frozen BatchNorm."""
-    def __init__(self, name: str,
-                 train_backbone: bool,
-                 return_interm_layers: bool,
-                 dilation: bool):
+
+    def __init__(
+        self,
+        name: str,
+        train_backbone: bool,
+        return_interm_layers: bool,
+        dilation: bool,
+    ):
         backbone = getattr(torchvision.models, name)(
             replace_stride_with_dilation=[False, False, dilation],
-            pretrained=is_main_process(), norm_layer=FrozenBatchNorm2d)
-        num_channels = 512 if name in ('resnet18', 'resnet34') else 2048
+            pretrained=is_main_process(),
+            norm_layer=FrozenBatchNorm2d,
+        )
+
+        # 🌟 修改 3: 根據是否輸出中間層，給予對應的通道數陣列 (List)
+        if return_interm_layers:
+            num_channels = (
+                [512, 1024, 2048]
+                if name not in ("resnet18", "resnet34")
+                else [128, 256, 512]
+            )
+        else:
+            num_channels = [2048] if name not in ("resnet18", "resnet34") else [512]
+
         super().__init__(backbone, train_backbone, num_channels, return_interm_layers)
 
 
 class Joiner(nn.Sequential):
+    # ... 這個類別保持原樣不變，它已經能很好地處理 List 的輸入了 ...
     def __init__(self, backbone, position_embedding):
         super().__init__(backbone, position_embedding)
 
@@ -112,8 +160,14 @@ class Joiner(nn.Sequential):
 def build_backbone(args):
     position_embedding = build_position_encoding(args)
     train_backbone = args.lr_backbone > 0
-    return_interm_layers = args.masks
-    backbone = Backbone(args.backbone, train_backbone, return_interm_layers, args.dilation)
+
+    # 🌟 修改 4: 強制開啟 return_interm_layers，或者你可以去 main.py 增加一個 args.num_feature_levels
+    # 在這裡我們直接先寫死為 True，確保多尺度特徵能順利輸出
+    return_interm_layers = True
+
+    backbone = Backbone(
+        args.backbone, train_backbone, return_interm_layers, args.dilation
+    )
     model = Joiner(backbone, position_embedding)
     model.num_channels = backbone.num_channels
     return model
