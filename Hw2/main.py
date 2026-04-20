@@ -166,13 +166,16 @@ def visualize_validation(model, postprocessors, data_loader, device, output_dir)
 def get_args_parser():
     parser = argparse.ArgumentParser("Set transformer detector", add_help=False)
 
-    parser.add_argument("--lr", default=1e-4, type=float)
+    parser.add_argument("--lr", default=2e-5, type=float)
     parser.add_argument("--lr_backbone", default=1e-5, type=float)
     parser.add_argument("--batch_size", default=2, type=int)
     parser.add_argument("--weight_decay", default=1e-4, type=float)
     parser.add_argument("--epochs", default=300, type=int)
     parser.add_argument("--lr_drop", default=200, type=int)
     parser.add_argument("--project_name", default="default_project", type=str)
+    parser.add_argument(
+        "--warmup_steps", default=2000, type=int, help="Number of warmup iterations"
+    )
     parser.add_argument(
         "--eval_weights",
         default=None,
@@ -293,12 +296,17 @@ def main(args):
     lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, args.lr_drop)
 
     # ==========================================================
+    # 🌟 新增：初始化 AMP GradScaler
+    # ==========================================================
+    scaler = torch.cuda.amp.GradScaler()
+
+    # ==========================================================
     # 🌟 載入 Resume 權重 (接續訓練)
     # ==========================================================
     if args.resume:
         if os.path.exists(args.resume):
             print(f"▶️ Resuming from checkpoint: {args.resume}")
-            checkpoint = torch.load(args.resume, map_location="cpu")
+            checkpoint = torch.load(args.resume, map_location="cpu", weights_only=False)
             model_without_ddp.load_state_dict(checkpoint["model"])
 
             # 確保訓練狀態也能接續 (包含 Epoch、Optimizer 與 Scheduler)
@@ -306,6 +314,11 @@ def main(args):
                 optimizer.load_state_dict(checkpoint["optimizer"])
                 lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
                 args.start_epoch = checkpoint["epoch"] + 1
+
+                # 🌟 新增：載入 scaler 狀態
+                if "scaler" in checkpoint and checkpoint["scaler"] is not None:
+                    scaler.load_state_dict(checkpoint["scaler"])
+
                 print(f"📈 Resuming training from Epoch {args.start_epoch}")
         else:
             print(
@@ -329,6 +342,8 @@ def main(args):
                 device,
                 epoch,
                 args.clip_max_norm,
+                scaler=scaler,
+                warmup_steps=args.warmup_steps,
             )
             lr_scheduler.step()
 
@@ -348,9 +363,24 @@ def main(args):
                     writer.add_scalar(f"train/{k}", v, epoch)
                 elif isinstance(v, torch.Tensor) and v.numel() == 1:
                     writer.add_scalar(f"train/{k}", v.item(), epoch)
-
             for k, v in test_stats.items():
-                if isinstance(v, (int, float)):
+                # 🌟 特殊處理 COCO 指標列表
+                if k == "coco_eval_bbox":
+                    writer.add_scalar("val/mAP", v[0], epoch)  # AP @ [0.50:0.95]
+                    writer.add_scalar("val/mAP_50", v[1], epoch)  # AP @ 0.50
+                    writer.add_scalar("val/mAP_75", v[2], epoch)  # AP @ 0.75
+                    writer.add_scalar(
+                        "val/mAP_small", v[3], epoch
+                    )  # AP for small objects
+                    writer.add_scalar(
+                        "val/mAP_medium", v[4], epoch
+                    )  # AP for medium objects
+                    writer.add_scalar(
+                        "val/mAP_large", v[5], epoch
+                    )  # AP for large objects
+
+                # 原有的純量記錄
+                elif isinstance(v, (int, float)):
                     writer.add_scalar(f"val/{k}", v, epoch)
 
             # 建立要儲存的完整狀態字典 (包含 epoch 與 optimizer 以便未來 Resume)
@@ -360,6 +390,7 @@ def main(args):
                 "lr_scheduler": lr_scheduler.state_dict(),
                 "epoch": epoch,
                 "args": args,
+                "scaler": scaler.state_dict(),  # 🌟 新增：保存 scaler 狀態
             }
 
             # 🌟 每個 Epoch 存檔 latest.pth (確保系統中斷時不會遺失太多進度)
@@ -387,7 +418,7 @@ def main(args):
     best_path = output_dir / "checkpoint_best.pth"
     if best_path.exists():
         print(f"▶️ Loading BEST weights from {best_path}")
-        checkpoint = torch.load(best_path, map_location="cpu")
+        checkpoint = torch.load(best_path, map_location="cpu", weights_only=False)
         model_without_ddp.load_state_dict(checkpoint["model"])
 
         print("Running Validation Visualization (Best)...")
@@ -402,7 +433,7 @@ def main(args):
     last_path = output_dir / "checkpoint_last.pth"
     if last_path.exists():
         print(f"▶️ Loading LAST weights from {last_path}")
-        checkpoint = torch.load(last_path, map_location="cpu")
+        checkpoint = torch.load(last_path, map_location="cpu", weights_only=False)
         model_without_ddp.load_state_dict(checkpoint["model"])
 
         print("Running Blind Test (Last)...")

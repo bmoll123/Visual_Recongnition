@@ -22,6 +22,8 @@ def train_one_epoch(
     device: torch.device,
     epoch: int,
     max_norm: float = 0,
+    scaler=None,  # 保留參數防止 main.py 報錯，但內部不再使用
+    warmup_steps: int = 2000,
 ):
     model.train()
     criterion.train()
@@ -33,18 +35,41 @@ def train_one_epoch(
     header = "Epoch: [{}]".format(epoch)
     print_freq = 10
 
-    for samples, targets in metric_logger.log_every(data_loader, print_freq, header):
+    # Warmup 設定
+    num_steps_per_epoch = len(data_loader)
+
+    for i, (samples, targets) in enumerate(
+        metric_logger.log_every(data_loader, print_freq, header)
+    ):
+
+        # 🌟 計算全域步數 (Global Step)
+        cur_step = epoch * num_steps_per_epoch + i
+
+        # 🌟 Linear Warmup 邏輯
+        if cur_step < warmup_steps:
+            warmup_factor = cur_step / warmup_steps
+            for param_group in optimizer.param_groups:
+                if "initial_lr" not in param_group:
+                    param_group["initial_lr"] = param_group["lr"]
+                param_group["lr"] = param_group["initial_lr"] * warmup_factor
+
         samples = samples.to(device)
         targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
 
+        optimizer.zero_grad()
+
+        # ========================================================
+        # 🌟 1. 純 FP32 前向傳播 (徹底移除 autocast)
+        # ========================================================
         outputs = model(samples)
+
+        # 損失計算 (同樣在 FP32 下進行，絕對穩定)
         loss_dict = criterion(outputs, targets)
         weight_dict = criterion.weight_dict
         losses = sum(
             loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict
         )
 
-        # reduce losses over all GPUs for logging purposes
         loss_dict_reduced = utils.reduce_dict(loss_dict)
         loss_dict_reduced_unscaled = {
             f"{k}_unscaled": v for k, v in loss_dict_reduced.items()
@@ -63,7 +88,9 @@ def train_one_epoch(
             print(loss_dict_reduced)
             sys.exit(1)
 
-        optimizer.zero_grad()
+        # ========================================================
+        # 🌟 2. 純 FP32 反向傳播 (徹底移除 scaler 邏輯)
+        # ========================================================
         losses.backward()
         if max_norm > 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
@@ -74,7 +101,7 @@ def train_one_epoch(
         )
         metric_logger.update(class_error=loss_dict_reduced["class_error"])
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
-    # gather the stats from all processes
+
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
@@ -95,25 +122,17 @@ def evaluate(
 
     iou_types = tuple(k for k in ("segm", "bbox") if k in postprocessors.keys())
     coco_evaluator = CocoEvaluator(base_ds, iou_types)
-    # coco_evaluator.coco_eval[iou_types[0]].params.iouThrs = [0, 0.1, 0.5, 0.75]
-
-    panoptic_evaluator = None
-    if "panoptic" in postprocessors.keys():
-        panoptic_evaluator = PanopticEvaluator(
-            data_loader.dataset.ann_file,
-            data_loader.dataset.ann_folder,
-            output_dir=os.path.join(output_dir, "panoptic_eval"),
-        )
 
     for samples, targets in metric_logger.log_every(data_loader, 10, header):
         samples = samples.to(device)
         targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
 
+        # 🌟 3. 推論時同樣使用純 FP32 (移除 autocast)
         outputs = model(samples)
+
         loss_dict = criterion(outputs, targets)
         weight_dict = criterion.weight_dict
 
-        # reduce losses over all GPUs for logging purposes
         loss_dict_reduced = utils.reduce_dict(loss_dict)
         loss_dict_reduced_scaled = {
             k: v * weight_dict[k]
@@ -132,11 +151,7 @@ def evaluate(
 
         orig_target_sizes = torch.stack([t["orig_size"] for t in targets], dim=0)
         results = postprocessors["bbox"](outputs, orig_target_sizes)
-        if "segm" in postprocessors.keys():
-            target_sizes = torch.stack([t["size"] for t in targets], dim=0)
-            results = postprocessors["segm"](
-                results, outputs, orig_target_sizes, target_sizes
-            )
+
         res = {
             target["image_id"].item(): output
             for target, output in zip(targets, results)
@@ -144,41 +159,18 @@ def evaluate(
         if coco_evaluator is not None:
             coco_evaluator.update(res)
 
-        if panoptic_evaluator is not None:
-            res_pano = postprocessors["panoptic"](
-                outputs, target_sizes, orig_target_sizes
-            )
-            for i, target in enumerate(targets):
-                image_id = target["image_id"].item()
-                file_name = f"{image_id:012d}.png"
-                res_pano[i]["image_id"] = image_id
-                res_pano[i]["file_name"] = file_name
-
-            panoptic_evaluator.update(res_pano)
-
-    # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
     if coco_evaluator is not None:
         coco_evaluator.synchronize_between_processes()
-    if panoptic_evaluator is not None:
-        panoptic_evaluator.synchronize_between_processes()
 
-    # accumulate predictions from all images
     if coco_evaluator is not None:
         coco_evaluator.accumulate()
         coco_evaluator.summarize()
-    panoptic_res = None
-    if panoptic_evaluator is not None:
-        panoptic_res = panoptic_evaluator.summarize()
+
     stats = {k: meter.global_avg for k, meter in metric_logger.meters.items()}
     if coco_evaluator is not None:
         if "bbox" in postprocessors.keys():
             stats["coco_eval_bbox"] = coco_evaluator.coco_eval["bbox"].stats.tolist()
-        if "segm" in postprocessors.keys():
-            stats["coco_eval_masks"] = coco_evaluator.coco_eval["segm"].stats.tolist()
-    if panoptic_res is not None:
-        stats["PQ_all"] = panoptic_res["All"]
-        stats["PQ_th"] = panoptic_res["Things"]
-        stats["PQ_st"] = panoptic_res["Stuff"]
+
     return stats, coco_evaluator
