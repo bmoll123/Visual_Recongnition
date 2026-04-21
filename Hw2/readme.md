@@ -1,4 +1,4 @@
-# NYCU Computer Vision 2026 HW1
+# NYCU Computer Vision 2026 HW2
 
 * Student ID: 314553034
 * Name: 戴郁芸
