@@ -101,3 +101,5 @@ python predict.py \
 
 
 ## Performance Snapshot
+
+<img width="1144" height="67" alt="截圖 2026-04-21 下午5 40 04" src="https://github.com/user-attachments/assets/4d56ddea-3be0-4b5b-aa9f-653469318b05" />
