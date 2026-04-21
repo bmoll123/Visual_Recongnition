@@ -1,0 +1,32 @@
+task: detection
+
+num_classes: 11
+remap_mscoco_category: False
+
+train_dataloader: 
+  type: DataLoader
+  dataset: 
+    type: CocoDetection
+    img_folder: /home/cvml-3/yy/114_2/Visual_Recongition/Hw2/data/train
+    ann_file: /home/cvml-3/yy/114_2/Visual_Recongition/Hw2/data/train.json
+    transforms:
+      type: Compose
+      ops: ~
+  shuffle: True
+  batch_size: 64
+  num_workers: 4
+  drop_last: True 
+
+val_dataloader:
+  type: DataLoader
+  dataset: 
+    type: CocoDetection
+    img_folder: /home/cvml-3/yy/114_2/Visual_Recongition/Hw2/data/valid
+    ann_file: /home/cvml-3/yy/114_2/Visual_Recongition/Hw2/data/valid.json
+    transforms:
+      type: Compose
+      ops: ~ 
+  shuffle: False
+  batch_size: 64
+  num_workers: 4
+  drop_last: False

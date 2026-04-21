@@ -7,7 +7,6 @@ from pathlib import Path
 import os
 import zipfile
 
-# 🌟 修正 1：正確匯入 tqdm
 from tqdm import tqdm
 
 import numpy as np
@@ -324,10 +323,6 @@ def main(args):
             print(
                 f"⚠️ Warning: Checkpoint path '{args.resume}' not found. Starting from scratch."
             )
-
-    # ==========================================================
-    # 🌟 邏輯分流：訓練模式 vs 純測試模式
-    # ==========================================================
 
     if not args.eval:
         # --- 【訓練模式】 ---
