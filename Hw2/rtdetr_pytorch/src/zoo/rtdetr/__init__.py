@@ -1,6 +1,4 @@
-"""by lyuwenyu
-"""
-
+"""by lyuwenyu"""
 
 from .rtdetr import *
 
