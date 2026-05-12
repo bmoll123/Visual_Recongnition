@@ -350,7 +350,23 @@ def main(args):
                     writer.add_scalar(f"train/{k}", v.item(), epoch)
 
             for k, v in test_stats.items():
-                if isinstance(v, (int, float)):
+                # 🌟 特殊處理 COCO 指標列表
+                if k == "coco_eval_bbox":
+                    writer.add_scalar("val/mAP", v[0], epoch)  # AP @ [0.50:0.95]
+                    writer.add_scalar("val/mAP_50", v[1], epoch)  # AP @ 0.50
+                    writer.add_scalar("val/mAP_75", v[2], epoch)  # AP @ 0.75
+                    writer.add_scalar(
+                        "val/mAP_small", v[3], epoch
+                    )  # AP for small objects
+                    writer.add_scalar(
+                        "val/mAP_medium", v[4], epoch
+                    )  # AP for medium objects
+                    writer.add_scalar(
+                        "val/mAP_large", v[5], epoch
+                    )  # AP for large objects
+
+                # 原有的純量記錄
+                elif isinstance(v, (int, float)):
                     writer.add_scalar(f"val/{k}", v, epoch)
 
             # 建立要儲存的完整狀態字典 (包含 epoch 與 optimizer 以便未來 Resume)
