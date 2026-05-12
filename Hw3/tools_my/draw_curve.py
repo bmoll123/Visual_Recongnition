@@ -6,9 +6,9 @@ import os
 # 1. 設定區塊
 # ==========================================
 log_file_path = (
-    "../results/260508_resnext101_50epoch/20260507_162802/vis_data/20260507_162802.json"
+    "../results/260512_50e_fafpn/20260512_213941/vis_data/20260512_213941.json"
 )
-output_image_name = "../results/260508_resnext101_50epoch/training_loss_curve_epoch.png"
+output_image_name = "../results/260512_50e_fafpn/training_loss_curve_epoch.png"
 
 # ==========================================
 # 2. 讀取與解析檔案

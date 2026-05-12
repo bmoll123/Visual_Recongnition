@@ -58,30 +58,30 @@ train_dataloader = dict(
 )
 
 # 🌟 修改點：將 Validation 指向 Training Set 🌟
-val_cfg = None
-val_dataloader = None
-val_evaluator = None
-# val_dataloader = dict(
-#     batch_size=1,
-#     num_workers=2,
-#     dataset=dict(
-#         type="CocoDataset",
-#         data_root=data_root,
-#         metainfo=metainfo,
-#         ann_file="train_coco.json",  # 指向訓練集的標註檔
-#         data_prefix=dict(img="train/"),  # 指向訓練集的圖片資料夾
-#         test_mode=True,
-#         pipeline=test_pipeline,  # 驗證時使用標準 test_pipeline
-#     ),
-# )
+# val_cfg = None
+# val_dataloader = None
+# val_evaluator = None
+val_dataloader = dict(
+    batch_size=1,
+    num_workers=2,
+    dataset=dict(
+        type="CocoDataset",
+        data_root=data_root,
+        metainfo=metainfo,
+        ann_file="train_coco.json",  # 指向訓練集的標註檔
+        data_prefix=dict(img="train/"),  # 指向訓練集的圖片資料夾
+        test_mode=True,
+        pipeline=test_pipeline,  # 驗證時使用標準 test_pipeline
+    ),
+)
 
-# val_evaluator = dict(
-#     type="CocoMetric",
-#     ann_file=data_root + "train_coco.json",  # 同樣指向訓練集標註
-#     metric=["bbox", "segm"],
-# )
+val_evaluator = dict(
+    type="CocoMetric",
+    ann_file=data_root + "train_coco.json",  # 同樣指向訓練集標註
+    metric=["bbox", "segm"],
+)
 
-# val_cfg = dict(type="ValLoop")
+val_cfg = dict(type="ValLoop")
 
 # 5. 測試設定 (用於最終推論)
 test_dataloader = dict(
