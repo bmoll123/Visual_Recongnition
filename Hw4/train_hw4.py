@@ -28,27 +28,72 @@ class PromptIRModel(pl.LightningModule):
     def __init__(self, learning_rate=2e-4):
         super().__init__()
         self.net = PromptIR(decoder=True)
-        self.loss_fn = nn.L1Loss()
         self.learning_rate = learning_rate
-    
+        
+        # 宣告三種不同的損失函數
+        self.l1_loss = nn.L1Loss()
+        
+        # 1. Edge Loss 需要的索貝爾算子 (Sobel Filter) 權重
+        # 我們將其宣告為 buffer，這樣它會自動跟隨模型移到 GPU 上，但不會被訓練
+        sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=torch.float32).view(1, 1, 3, 3)
+        sobel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], dtype=torch.float32).view(1, 1, 3, 3)
+        # 擴充成 3 通道 (RGB) 影像適用
+        self.register_buffer('sobel_x', sobel_x.repeat(3, 1, 1, 1))
+        self.register_buffer('sobel_y', sobel_y.repeat(3, 1, 1, 1))
+
     def forward(self, x):
         return self.net(x)
-    
+
+    def _get_edges(self, x):
+        """利用卷積提取影像的邊緣梯度 (Edge)"""
+        # 使用 groups=3 代表 RGB 獨立計算梯度
+        grad_x = torch.nn.functional.conv2d(x, self.sobel_x, padding=1, groups=3)
+        grad_y = torch.nn.functional.conv2d(x, self.sobel_y, padding=1, groups=3)
+        return torch.sqrt(grad_x ** 2 + grad_y ** 2 + 1e-6)
+
+    def _fft_loss(self, outputs, targets):
+        """計算預測圖與真實圖在頻域上的 L1 誤差"""
+        # 對最後兩個空間維度 (H, W) 做快速傅立葉變換
+        outputs_fft = torch.fft.rfft2(outputs, dim=(-2, -1))
+        targets_fft = torch.fft.rfft2(targets, dim=(-2, -1))
+        
+        # 傅立葉變換出來是複數 (Complex)，取 torch.abs 得到振幅譜後計算 L1 Loss
+        return torch.mean(torch.abs(outputs_fft - targets_fft))
+
     def training_step(self, batch, batch_idx):
         """Training step"""
         ([clean_name, de_id], degrad_patch, clean_patch) = batch
         restored = self.net(degrad_patch)
-        loss = self.loss_fn(restored, clean_patch)
         
-        self.log("train_loss", loss, prog_bar=True, on_step=True, on_epoch=True)
-        return loss
-    
+        # 1. 計算基礎的 Pixel-wise L1 Loss
+        loss_l1 = self.l1_loss(restored, clean_patch)
+        
+        # 2. 計算 Edge Loss (提取邊緣後對齊邊緣的 L1 誤差)
+        restored_edges = self._get_edges(restored)
+        clean_edges = self._get_edges(clean_patch)
+        loss_edge = self.l1_loss(restored_edges, clean_edges)
+        
+        # 3. 計算 FFT Loss (頻域細節對齊)
+        loss_fft = self._fft_loss(restored, clean_patch)
+        
+        # 4. 組合拳：動態調配權重 (經常用於衝 PSNR 的經典比例)
+        # lambda_edge = 0.05, lambda_fft = 0.1
+        total_loss = loss_l1 + 0.05 * loss_edge + 0.1 * loss_fft
+        
+        # 將各個拆解的 Loss 記錄到 TensorBoard，方便你觀察收斂狀態
+        self.log("train_loss_l1", loss_l1, on_step=True, on_epoch=False)
+        self.log("train_loss_edge", loss_edge, on_step=True, on_epoch=False)
+        self.log("train_loss_fft", loss_fft, on_step=True, on_epoch=False)
+        self.log("train_loss", total_loss, prog_bar=True, on_step=True, on_epoch=True)
+        
+        return total_loss
+
     def validation_step(self, batch, batch_idx):
-        """Validation step"""
+        """Validation step - 驗證時我們依然可以用純 L1 作為監控，或者沿用 total_loss"""
         ([clean_name, de_id], degrad_patch, clean_patch) = batch
         restored = self.net(degrad_patch)
-        loss = self.loss_fn(restored, clean_patch)
         
+        loss = self.l1_loss(restored, clean_patch)
         temp_psnr, temp_ssim, N = compute_psnr_ssim(restored, clean_patch)
         
         self.log("val_loss", loss, prog_bar=True, on_epoch=True)
@@ -60,7 +105,7 @@ class PromptIRModel(pl.LightningModule):
             "psnr": temp_psnr,
             "ssim": temp_ssim
         }
-    
+
     def configure_optimizers(self):
         """Configure optimizer and learning rate scheduler"""
         optimizer = optim.AdamW(self.parameters(), lr=self.learning_rate)
