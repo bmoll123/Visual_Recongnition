@@ -27,6 +27,7 @@ pip install lightning
 pip install accelerate deepspeed
 pip install -U 'tensorboard'
 pip install -U 'tensorboardX'
+pip install scikit-video
 ```
 
 ## Usage
@@ -35,6 +36,7 @@ pip install -U 'tensorboardX'
 ```
 python train_hw4.py --epochs 150 --batch_size 4 --ckpt_dir ./results/0531_origin
 ```
+--resume
 
 ### Inference
 ```

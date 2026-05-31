@@ -1,25 +1,24 @@
-
 import time
 import numpy as np
 from skimage.metrics import peak_signal_noise_ratio, structural_similarity
 from skvideo.measure import niqe
 
 
-class AverageMeter():
-    """ Computes and stores the average and current value """
+class AverageMeter:
+    """Computes and stores the average and current value"""
 
     def __init__(self):
         self.reset()
 
     def reset(self):
-        """ Reset all statistics """
+        """Reset all statistics"""
         self.val = 0
         self.avg = 0
         self.sum = 0
         self.count = 0
 
     def update(self, val, n=1):
-        """ Update statistics """
+        """Update statistics"""
         self.val = val
         self.sum += val * n
         self.count += n
@@ -27,7 +26,7 @@ class AverageMeter():
 
 
 def accuracy(output, target, topk=(1,)):
-    """ Computes the precision@k for the specified values of k """
+    """Computes the precision@k for the specified values of k"""
     maxk = max(topk)
     batch_size = target.size(0)
 
@@ -61,7 +60,9 @@ def compute_psnr_ssim(recoverd, clean):
         # psnr_val += compare_psnr(clean[i], recoverd[i])
         # ssim += compare_ssim(clean[i], recoverd[i], multichannel=True)
         psnr += peak_signal_noise_ratio(clean[i], recoverd[i], data_range=1)
-        ssim += structural_similarity(clean[i], recoverd[i], data_range=1, multichannel=True)
+        ssim += structural_similarity(
+            clean[i], recoverd[i], data_range=1.0, channel_axis=-1
+        )
 
     return psnr / recoverd.shape[0], ssim / recoverd.shape[0], recoverd.shape[0]
 
@@ -73,7 +74,8 @@ def compute_niqe(image):
 
     return niqe_val.mean()
 
-class timer():
+
+class timer:
     def __init__(self):
         self.acc = 0
         self.tic()

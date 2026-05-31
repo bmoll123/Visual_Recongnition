@@ -1,109 +1,115 @@
-# PromptIR: Prompting for All-in-One Blind Image Restoration (NeurIPS'23)
+為您寫好了一份結構完整、排版清晰的 `README.md`。這份說明書針對您提供的高級實驗管理指令腳本（`train_hw4.py`）進行了詳細的參數說明與範例演示，方便您自己、助教或組員快速上手。
 
-[Vaishnav Potlapalli](https://www.vaishnavrao.com/), [Syed Waqas Zamir](https://scholar.google.ae/citations?hl=en&user=POoai-QAAAAJ), [Salman Khan](https://salman-h-khan.github.io/) and [Fahad Shahbaz Khan](https://scholar.google.es/citations?user=zvaeYnUAAAAJ&hl=en)
+---
 
-[![paper](https://img.shields.io/badge/arXiv-Paper-<COLOR>.svg)](https://arxiv.org/abs/2306.13090)
+# PromptIR 實驗管理與訓練指南 (HW4)
 
+本腳本是專為 **HW4 影像修復任務** 打造的完整實驗管理訓練系統。每次執行都會將所有輸出（包括模型權重、訓練日誌、實驗配置）結構化地儲存至指定的實驗目錄中，確保實驗過程 100% 可追溯。
 
-<hr />
+## 📌 實驗目錄結構
 
-> **Abstract:** *Image restoration involves recovering a high-quality clean image from its degraded
-version. Deep learning-based methods have significantly improved image restora-
-tion performance, however, they have limited generalization ability to different
-degradation types and levels. This restricts their real-world application since it
-requires training individual models for each specific degradation and knowing the
-input degradation type to apply the relevant model. We present a prompt-based
-learning approach, PromptIR, for All-In-One image restoration that can effectively
-restore images from various types and levels of degradation. In particular, our
-method uses prompts to encode degradation-specific information, which is then
-used to dynamically guide the restoration network. This allows our method to
-generalize to different degradation types and levels, while still achieving state-of-
-the-art results on image denoising, deraining, and dehazing. Overall, PromptIR
-offers a generic and efficient plugin module with few lightweight prompts that can
-be used to restore images of various types and levels of degradation with no prior
-information of corruptions.* 
-<hr />
+當您啟動一個實驗時（例如指定 `--exp_dir experiments/exp_001`），腳本會自動為您建立以下結構：
 
-## Network Architecture
-
-<img src = "mainfig.png"> 
-
-## Installation and Data Preparation
-
-See [INSTALL.md](INSTALL.md) for the installation of dependencies and dataset preperation required to run this codebase.
-
-## Training
-
-After preparing the training data in ```data/``` directory, use 
-```
-python train.py
-```
-to start the training of the model. Use the ```de_type``` argument to choose the combination of degradation types to train on. By default it is set to all the 3 degradation types (noise, rain, and haze).
-
-Example Usage: If we only want to train on deraining and dehazing:
-```
-python train.py --de_type derain dehaze
-```
-
-## Testing
-
-After preparing the testing data in ```test/``` directory, place the mode checkpoint file in the ```ckpt``` directory. The pretrained model can be downloaded [here](https://drive.google.com/file/d/1j-b5Od70pGF7oaCqKAfUzmf-N-xEAjYl/view?usp=sharingg), alternatively, it is also available under the releases tab. To perform the evalaution use
-```
-python test.py --mode {n}
-```
-```n``` is a number that can be used to set the tasks to be evaluated on, 0 for denoising, 1 for deraining, 2 for dehaazing and 3 for all-in-one setting.
-
-Example Usage: To test on all the degradation types at once, run:
+```text
+experiments/exp_001/
+├── config.yaml          # 本次實驗的完整參數與執行時間記錄
+├── ckpt/                # 模型權重資料夾
+│   ├── best-epoch=012-val_psnr=28.50.ckpt  # 性能前 K 佳的模型
+│   └── last.ckpt        # 最新一輪的權重（用於中斷恢復）
+└── logs/                # TensorBoard 訓練日誌資料夾
+    └── version_0/
+        └── events.out.tfevents...
 
 ```
-python test.py --mode 3
+
+---
+
+## 🚀 常用指令範例
+
+### 1. 第一次啟動訓練（全新實驗）
+
+指定實驗目錄為 `exp_001`，設定 Batch Size 為 4 跑 150 個 Epoch：
+
+```bash
+python train_hw4.py --exp_dir experiments/exp_001 --epochs 150 --batch_size 4
+
 ```
 
-## Demo
-To obtain visual results from the model ```demo.py``` can be used. After placing the saved model file in ```ckpt``` directory, run:
+### 2. 中斷後自動恢復訓練（Auto Resume）
+
+如果訓練到一半斷網、斷電或被系統砍掉，只要加上 `--auto_resume`，腳本會自動去 `ckpt/` 資料夾尋找最新的進度並無縫接軌繼續訓練：
+
+```bash
+python train_hw4.py --exp_dir experiments/exp_001 --auto_resume --epochs 150
+
 ```
-python demo.py --test_path {path_to_degraded_images} --output_path {save_images_here}
+
+### 3. 從特定 Checkpoint 載入權重微調
+
+如果您想指定特定的權重檔案進行載入（例如改跑不同的實驗，但想用之前的預訓練權重）：
+
+```bash
+python train_hw4.py --exp_dir experiments/exp_002_finetune --resume experiments/exp_001/ckpt/best-epoch=050-val_psnr=29.20.ckpt --epochs 50
+
 ```
-Example usage to run inference on a directory of images:
+
+### 4. 多顯示卡平行訓練（Multi-GPU DDP）
+
+如果您實驗室的伺服器有多張顯卡（例如 2 張 GPU），腳本已內建 PyTorch Lightning 的 DDP 分散式架構，直接指定數量即可倍速訓練：
+
+```bash
+python train_hw4.py --exp_dir experiments/exp_multi_gpu --num_gpus 2 --batch_size 8
+
 ```
-python demo.py --test_path './test/demo/' --output_path './output/demo/'
+
+---
+
+## 🎛️ 完整參數說明表
+
+您可以透過 `python train_hw4.py --help` 查看所有參數，以下為重點參數彙整：
+
+### 1. 實驗設置 (Experiment Settings)
+
+| 參數 | 型態 | 預設值 | 說明 |
+| --- | --- | --- | --- |
+| `--exp_dir` | `str` | **(必填)** | 實驗儲存的根目錄路徑（例如 `exps/baseline`） |
+| `--exp_name` | `str` | `promptir_hw4` | 用於 TensorBoard 紀錄的實驗名稱識別 |
+
+### 2. 資料集設置 (Data Settings)
+
+| 參數 | 型態 | 預設值 | 說明 |
+| --- | --- | --- | --- |
+| `--data_root` | `str` | `dataset/hw4_realse_dataset/train` | 訓練資料集的根目錄路徑 |
+| `--patch_size` | `int` | `128` | 訓練時隨機裁切的影像 Patch 大小 |
+| `--batch_size` | `int` | `8` | 每張 GPU 的單次訓練批次量 |
+| `--num_workers` | `int` | `4` | DataLoader 的多線程讀取數量 |
+| `--val_split` | `float` | `0.1` | 切分驗證集的比例（`0.1` 代表 10% 資料用作驗證） |
+
+### 3. 訓練與優化器設置 (Training Settings)
+
+| 參數 | 型態 | 預設值 | 說明 |
+| --- | --- | --- | --- |
+| `--epochs` | `int` | `150` | 總訓練輪數 |
+| `--lr` | `float` | `2e-4` | 初始學習率（會搭配 15 Epochs 的 Warmup 與 Cosine 退火） |
+| `--num_gpus` | `int` | `1` | 使用的 GPU 數量 |
+
+### 4. 權重保存與早停機制 (Checkpoint & Early Stopping)
+
+| 參數 | 型態 | 預設值 | 說明 |
+| --- | --- | --- | --- |
+| `--monitor_metric` | `str` | `val_psnr` | 監控的核心指標，可選：`val_psnr`, `val_loss`, `val_ssim` |
+| `--save_top_k` | `int` | `3` | 自動保留效能最好的前 K 個模型檔案 |
+| `--early_stopping_patience` | `int` | `20` | 超過幾輪指標沒有改善就提早結束訓練（`0` 代表關閉此功能） |
+
+---
+
+## 📊 訓練日誌視覺化 (TensorBoard)
+
+訓練開啟後，您可以隨時開另一個終端機視窗，啟動 TensorBoard 來即時監控 `Loss`、`PSNR` 與 `SSIM` 的曲線變化：
+
+```bash
+tensorboard --logdir experiments/exp_001/logs/
+
 ```
-Example usage to run inference on an image directly:
-```
-python demo.py --test_path './test/demo/image.png' --output_path './output/demo/'
-```
-To use tiling option while running ```demo.py``` set ```--tile``` option to ```True```. The Tile size and Tile overlap parameters can be adjusted using ```--tile_size``` and ```--tile_overlap``` options respectively.
 
-
-
-
-## Results
-Performance results of the PromptIR framework trained under the all-in-one setting
-
-<summary><strong>Table</strong> </summary>
-
-<img src = "prompt-ir-results.png"> 
-
-<summary><strong>Visual Results</strong></summary>
-
-The visual results of the PromptIR model evaluated under the all-in-one setting can be downloaded [here](https://drive.google.com/drive/folders/1Sm-mCL-i4OKZN7lKuCUrlMP1msYx3F6t?usp=sharing)
-
-
-
-## Citation
-If you use our work, please consider citing:
-
-    @inproceedings{potlapalli2023promptir,
-      title={PromptIR: Prompting for All-in-One Image Restoration},
-      author={Potlapalli, Vaishnav and Zamir, Syed Waqas and Khan, Salman and Khan, Fahad},
-      booktitle={Thirty-seventh Conference on Neural Information Processing Systems},
-      year={2023}
-    }
-
-
-## Contact
-Should you have any questions, please contact pvaishnav2718@gmail.com
-
-
-**Acknowledgment:** This code is based on the [AirNet](https://github.com/XLearning-SCU/2022-CVPR-AirNet) and [Restormer](https://github.com/swz30/Restormer) repositories. 
-
+接著打開瀏覽器輸入 `http://localhost:6006` 即可看到精美的圖表。
