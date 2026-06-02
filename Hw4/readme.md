@@ -59,3 +59,4 @@ python infer_hw4.py --ckpt_path ./results/last.ckpt --output_path ./results/infe
 ```
 
 ## Performance Snapshot
+<img width="1070" height="41" alt="截圖 2026-06-02 晚上8 59 31" src="https://github.com/user-attachments/assets/2eb2755c-3631-4bb3-b3b8-3239b50f5b09" />
