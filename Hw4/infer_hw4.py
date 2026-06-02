@@ -1,6 +1,7 @@
 """
 Inference script for Hw4 Image Restoration
 Generates pred.npz file with restored images and compresses it into a zip file.
+With Test-Time Augmentation (TTA): Original, Horizontal, Vertical, and Both.
 """
 
 import argparse
@@ -86,6 +87,8 @@ def main():
         "--num_workers", type=int, default=0, help="Number of workers for data loading"
     )
     parser.add_argument("--cuda", type=int, default=0, help="GPU device index")
+    # 新增一個參數可以控制是否啟用 TTA
+    parser.add_argument("--tta", action="store_true", help="Enable Test-Time Augmentation (TTA)")
 
     args = parser.parse_args()
 
@@ -95,6 +98,7 @@ def main():
     print(f"Test root: {args.test_root}")
     print(f"Checkpoint: {args.ckpt_path}")
     print(f"Output: {args.output_path}")
+    print(f"TTA Enabled: {args.tta}")
     print("=" * 50)
 
     # Set device
@@ -135,8 +139,30 @@ def main():
         for [image_names], degraded_imgs in tqdm(testloader, desc="Inference"):
             degraded_imgs = degraded_imgs.to(device)
 
-            # Forward pass
-            restored_imgs = model.net(degraded_imgs)
+            if args.tta:
+                # 1. 原始圖像預測
+                out_orig = model.net(degraded_imgs)
+
+                # 2. 水平翻轉預測 (dims: 3 是 W 軸)
+                inputs_hf = torch.flip(degraded_imgs, dims=[3])
+                out_hf = model.net(inputs_hf)
+                out_hf = torch.flip(out_hf, dims=[3])  # 翻轉回來
+
+                # 3. 垂直翻轉預測 (dims: 2 是 H 軸)
+                inputs_vf = torch.flip(degraded_imgs, dims=[2])
+                out_vf = model.net(inputs_vf)
+                out_vf = torch.flip(out_vf, dims=[2])  # 翻轉回來
+
+                # 4. 同時水平與垂直翻轉預測
+                inputs_hvf = torch.flip(degraded_imgs, dims=[2, 3])
+                out_hvf = model.net(inputs_hvf)
+                out_hvf = torch.flip(out_hvf, dims=[2, 3])  # 翻轉回來
+
+                # 四個結果取平均
+                restored_imgs = (out_orig + out_hf + out_vf + out_hvf) / 4.0
+            else:
+                # 正常不使用 TTA 的 Forward pass
+                restored_imgs = model.net(degraded_imgs)
 
             # Process each image in batch
             for i, image_name in enumerate(image_names):
@@ -159,19 +185,16 @@ def main():
     print(f"NPZ File size: {os.path.getsize(args.output_path) / 1e6:.2f} MB")
 
     # --- 新增的自動壓縮成 ZIP 邏輯 ---
-    # 定義 zip 的存檔路徑，自動將原本結尾的 .npz 取代為 .zip
     zip_path = args.output_path.replace(".npz", ".zip")
     if not zip_path.endswith(".zip"):
         zip_path += ".zip"
 
     print(f"Compressing {args.output_path} into {zip_path}...")
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
-        # arcname 可以確保壓縮檔點開後，裡面直接是 pred.npz 檔案，而不會包含前面一長串資料夾路徑
         zipf.write(args.output_path, arcname=os.path.basename(args.output_path))
 
     print(f"Success! Zip file saved to {zip_path}")
     print(f"ZIP File size: {os.path.getsize(zip_path) / 1e6:.2f} MB")
-    # ---------------------------------
 
 
 if __name__ == "__main__":

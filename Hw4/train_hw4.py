@@ -215,6 +215,18 @@ Examples:
     print(f"  └── Logs:        {os.path.abspath(logs_dir)}")
     print("=" * 80)
     
+    # 【自動切換防呆機制】如果沒有驗證集，覆蓋相關變數
+    actual_monitor_metric = args.monitor_metric
+    actual_early_stopping_patience = args.early_stopping_patience
+    ckpt_filename = 'best-{epoch:03d}-{val_psnr:.2f}'
+    
+    if args.val_split <= 0:
+        print("\n⚠️  [警告] val_split 設定為 0（無驗證集）。")
+        print("   自動將 monitor_metric 改為 'train_loss' 並關閉 Early Stopping！")
+        actual_monitor_metric = 'train_loss'
+        actual_early_stopping_patience = 0
+        ckpt_filename = 'best-{epoch:03d}-{train_loss:.4f}'
+
     # 保存配置
     config = {
         'timestamp': datetime.now().isoformat(),
@@ -232,9 +244,9 @@ Examples:
             'num_workers': args.num_workers,
         },
         'checkpoint': {
-            'monitor_metric': args.monitor_metric,
+            'monitor_metric': actual_monitor_metric,
             'save_top_k': args.save_top_k,
-            'early_stopping_patience': args.early_stopping_patience,
+            'early_stopping_patience': actual_early_stopping_patience,
         }
     }
     
@@ -246,8 +258,8 @@ Examples:
     print(f"  Batch size: {args.batch_size} | Patch size: {args.patch_size}")
     print(f"  Validation split: {args.val_split*100:.0f}%")
     print(f"  Epochs: {args.epochs} | Learning rate: {args.lr}")
-    print(f"  Monitor metric: {args.monitor_metric}")
-    print(f"  Early stopping patience: {args.early_stopping_patience if args.early_stopping_patience > 0 else 'Disabled'}")
+    print(f"  Monitor metric: {actual_monitor_metric}")
+    print(f"  Early stopping patience: {actual_early_stopping_patience if actual_early_stopping_patience > 0 else 'Disabled'}")
     print("=" * 80)
     
     # Set random seeds
@@ -262,13 +274,27 @@ Examples:
     # Split into train/val
     val_size = int(len(full_dataset) * args.val_split)
     train_size = len(full_dataset) - val_size
-    train_dataset, val_dataset = torch.utils.data.random_split(
-        full_dataset, 
-        [train_size, val_size],
-        generator=torch.Generator().manual_seed(0)
-    )
     
-    print(f"Training set: {len(train_dataset)} | Validation set: {len(val_dataset)}")
+    # 建立對應的 DataLoader，如果有驗證集才進行切割
+    if val_size > 0:
+        train_dataset, val_dataset = torch.utils.data.random_split(
+            full_dataset, 
+            [train_size, val_size],
+            generator=torch.Generator().manual_seed(0)
+        )
+        valloader = DataLoader(
+            val_dataset,
+            batch_size=args.batch_size,
+            pin_memory=True,
+            shuffle=False,
+            drop_last=False,
+            num_workers=args.num_workers
+        )
+    else:
+        train_dataset = full_dataset
+        valloader = None
+        
+    print(f"Training set: {len(train_dataset)} | Validation set: {val_size}")
     
     # 创建数据加载器
     trainloader = DataLoader(
@@ -277,15 +303,6 @@ Examples:
         pin_memory=True,
         shuffle=True,
         drop_last=True,
-        num_workers=args.num_workers
-    )
-    
-    valloader = DataLoader(
-        val_dataset,
-        batch_size=args.batch_size,
-        pin_memory=True,
-        shuffle=False,
-        drop_last=False,
         num_workers=args.num_workers
     )
     
@@ -317,9 +334,9 @@ Examples:
     # 设置checkpoint callback - 所有checkpoints都在exp_dir/ckpt下
     checkpoint_callback = ModelCheckpoint(
         dirpath=ckpt_dir,
-        filename='best-{epoch:03d}-{val_psnr:.2f}',
-        monitor=args.monitor_metric,
-        mode='max' if 'psnr' in args.monitor_metric or 'ssim' in args.monitor_metric else 'min',
+        filename=ckpt_filename,
+        monitor=actual_monitor_metric,
+        mode='max' if 'psnr' in actual_monitor_metric or 'ssim' in actual_monitor_metric else 'min',
         save_top_k=args.save_top_k,
         save_last=True,
         verbose=True
@@ -327,11 +344,11 @@ Examples:
     
     # 设置early stopping (可选)
     callbacks = [checkpoint_callback]
-    if args.early_stopping_patience > 0:
+    if actual_early_stopping_patience > 0:
         early_stopping = EarlyStopping(
-            monitor=args.monitor_metric,
-            mode='max' if 'psnr' in args.monitor_metric else 'min',
-            patience=args.early_stopping_patience,
+            monitor=actual_monitor_metric,
+            mode='max' if 'psnr' in actual_monitor_metric else 'min',
+            patience=actual_early_stopping_patience,
             verbose=True,
             check_finite=True
         )
@@ -346,21 +363,21 @@ Examples:
         logger=logger,
         callbacks=callbacks,
         enable_progress_bar=True,
-        val_check_interval=1.0,
+        val_check_interval=1.0 if valloader is not None else 0, # 若無驗證集則設為0
         log_every_n_steps=50
     )
     
     # 开始训练
     print("\n" + "=" * 80)
     print("Starting training...")
-    print(f"Validation frequency: Every epoch")
-    print(f"Best model metric: {args.monitor_metric}")
+    print(f"Validation frequency: {'Every epoch' if valloader is not None else 'Disabled (val_split=0)'}")
+    print(f"Best model metric: {actual_monitor_metric}")
     print("=" * 80 + "\n")
     
     trainer.fit(
         model=model,
         train_dataloaders=trainloader,
-        val_dataloaders=valloader,
+        val_dataloaders=valloader, # 這裡如果傳入 None，PyTorch Lightning 會自動處理
         ckpt_path=resume_ckpt if resume_ckpt else None
     )
     
