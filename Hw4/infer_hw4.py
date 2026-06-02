@@ -1,6 +1,6 @@
 """
 Inference script for Hw4 Image Restoration
-Generates pred.npz file with restored images and compresses it into a zip file.
+Generates pred.npz file with restored images
 """
 
 import argparse
@@ -64,29 +64,22 @@ def main():
     parser = argparse.ArgumentParser(description="Inference for Hw4 Image Restoration")
 
     # Data arguments
-    parser.add_argument(
-        "--test_root",
-        type=str,
-        default="dataset/hw4_realse_dataset/test",
-        help="Root directory of test dataset",
-    )
-    parser.add_argument(
-        "--ckpt_path",
-        type=str,
-        default="train_ckpt/epoch=149-train_loss=0.0000.ckpt",
-        help="Path to model checkpoint",
-    )
-    parser.add_argument(
-        "--output_path", type=str, default="pred.npz", help="Output path for pred.npz"
-    )
-    parser.add_argument(
-        "--batch_size", type=int, default=1, help="Batch size for inference"
-    )
-    parser.add_argument(
-        "--num_workers", type=int, default=0, help="Number of workers for data loading"
-    )
-    parser.add_argument("--cuda", type=int, default=0, help="GPU device index")
-
+    parser.add_argument('--test_root', type=str,
+                        default='dataset/hw4_realse_dataset/test',
+                        help='Root directory of test dataset')
+    parser.add_argument('--ckpt_path', type=str,
+                        default='train_ckpt/epoch=149-train_loss=0.0000.ckpt',
+                        help='Path to model checkpoint')
+    parser.add_argument('--output_path', type=str,
+                        default='pred.npz',
+                        help='Output path for pred.npz')
+    parser.add_argument('--batch_size', type=int, default=1,
+                        help='Batch size for inference')
+    parser.add_argument('--num_workers', type=int, default=0,
+                        help='Number of workers for data loading')
+    parser.add_argument('--cuda', type=int, default=0,
+                        help='GPU device index')
+    
     args = parser.parse_args()
 
     print("=" * 50)
@@ -95,6 +88,7 @@ def main():
     print(f"Test root: {args.test_root}")
     print(f"Checkpoint: {args.ckpt_path}")
     print(f"Output: {args.output_path}")
+    print(f"TTA Enabled: {args.tta}")
     print("=" * 50)
 
     # Set device
@@ -111,7 +105,7 @@ def main():
         print(f"Error: Checkpoint not found at {args.ckpt_path}")
         print(f"Please check the checkpoint path and make sure training is completed.")
         return
-
+    
     model = PromptIRModel.load_from_checkpoint(args.ckpt_path)
     model = model.to(device)
     model.eval()
@@ -134,10 +128,10 @@ def main():
     with torch.no_grad():
         for [image_names], degraded_imgs in tqdm(testloader, desc="Inference"):
             degraded_imgs = degraded_imgs.to(device)
-
+            
             # Forward pass
             restored_imgs = model.net(degraded_imgs)
-
+            
             # Process each image in batch
             for i, image_name in enumerate(image_names):
                 restored_img = restored_imgs[i]  # (C, H, W)
@@ -158,21 +152,6 @@ def main():
     print(f"Done! Saved {len(pred_dict)} images to {args.output_path}")
     print(f"NPZ File size: {os.path.getsize(args.output_path) / 1e6:.2f} MB")
 
-    # --- 新增的自動壓縮成 ZIP 邏輯 ---
-    # 定義 zip 的存檔路徑，自動將原本結尾的 .npz 取代為 .zip
-    zip_path = args.output_path.replace(".npz", ".zip")
-    if not zip_path.endswith(".zip"):
-        zip_path += ".zip"
 
-    print(f"Compressing {args.output_path} into {zip_path}...")
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
-        # arcname 可以確保壓縮檔點開後，裡面直接是 pred.npz 檔案，而不會包含前面一長串資料夾路徑
-        zipf.write(args.output_path, arcname=os.path.basename(args.output_path))
-
-    print(f"Success! Zip file saved to {zip_path}")
-    print(f"ZIP File size: {os.path.getsize(zip_path) / 1e6:.2f} MB")
-    # ---------------------------------
-
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

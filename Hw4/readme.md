@@ -5,7 +5,23 @@
 
 ## Introduciton
 
+### Task Objective
+This assignment focuses on **Image Restoration**. The proposed model takes degraded images corrupted by either rain or snow as input and predicts the corresponding clean, high-quality images. The primary challenge is to effectively handle multiple, unknown degradation types within a single, unified framework.
 
+### Dataset Description
+The dataset consists of paired degraded and ground-truth clean images divided into the following splits:
+
+| Dataset Split | Rain Images | Snow Images | Total Images |
+| :--- | :---: | :---: | :---: |
+| **Training Set** | 1,440 | 1,440 | **2,880** |
+| **Validation Set** | 160 | 160 | **320** |
+| **Testing Set** | 50 | 50 | **100** |
+
+### Core Architecture
+The foundational framework of this project is **PromptIR** (Prompting for All-in-One Image Restoration). 
+
+* **Prompt-based Learning:** PromptIR utilizes a prompt-based learning formulation to dynamically adapt to different image degradations without relying on prior knowledge of the degradation type (blind restoration).
+* **Advanced Customization:** To further improve the structural and high-frequency restoration performance, the default optimization objective was enhanced by introducing **Edge-preservation** and **Frequency-domain constraints** into a composite loss function, significantly boosting the final PSNR performance.
 
 
 ## Environment Setup
@@ -34,13 +50,12 @@ pip install scikit-video
 
 ### Training
 ```
- python train_hw4.py --epochs 150 --batch_size 4 --exp_dir ./results/0531_origin --auto-resume
- ```
---resume
+python train_hw4.py --epochs 150 --batch_size 4 --exp_dir ./results/ --auto-resume
+```
 
 ### Inference
 ```
-
+python infer_hw4.py --ckpt_path ./results/last.ckpt --output_path ./results/inference/pred.npz
 ```
 
 ## Performance Snapshot
